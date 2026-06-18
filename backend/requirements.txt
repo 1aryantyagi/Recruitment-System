@@ -1,0 +1,53 @@
+# ---- Web framework ----
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+python-multipart==0.0.20
+
+# ---- Data layer (Datagraph) ----
+sqlalchemy==2.0.41
+alembic==1.16.1
+psycopg2-binary==2.9.10
+
+# ---- Validation / config ----
+pydantic==2.11.5
+pydantic-settings==2.9.1
+email-validator==2.2.0
+
+# ---- Auth / security ----
+python-jose[cryptography]==3.4.0
+bcrypt==4.3.0
+cryptography==44.0.1
+msal==1.32.3
+
+# ---- Agents (LangGraph + LangChain) ----
+langgraph==0.2.74
+langchain==0.3.21
+langchain-core==0.3.49
+langchain-openai==0.3.11
+langchain-anthropic==0.3.10
+openai==1.84.0
+anthropic==0.49.0
+
+# ---- Integrations ----
+google-api-python-client==2.170.0
+google-auth==2.40.2
+google-auth-oauthlib==1.2.2
+twilio==9.6.2
+deepgram-sdk==4.1.0
+pyngrok==8.1.2  # local-dev tunnel so Twilio webhooks reach :8000 (NGROK_ENABLED)
+
+# ---- Resume parsing ----
+pypdf==5.6.0
+python-docx==1.1.2
+
+# ---- Utilities ----
+httpx==0.28.1
+tenacity==9.1.2
+apscheduler==3.11.0
+python-dotenv==1.1.0
+structlog==25.4.0
+truststore==0.10.4
+
+# ---- Testing ----
+pytest==8.3.5
+pytest-asyncio==0.26.0

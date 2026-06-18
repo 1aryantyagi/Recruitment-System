@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.sqlite
+*.sqlite3
+
+# Storage (local-disk resume files)
+backend/storage/
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.env.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Claude local settings
+.claude/settings.local.json
