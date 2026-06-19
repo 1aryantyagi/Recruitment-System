@@ -119,8 +119,10 @@ def candidate_detail(db: Session, c: Candidate) -> dict:
         "resumes": [resume_dict(r) for r in db.execute(
             select(CandidateResume).where(CandidateResume.candidate_id == c.id)
             .order_by(CandidateResume.uploaded_at.desc())).scalars()],
-        "scores": [score_dict(s) for s in db.execute(
-            select(CandidateScore).where(CandidateScore.candidate_id == c.id)).scalars()],
+        "scores": [score_dict(s, title) for s, title in db.execute(
+            select(CandidateScore, Requisition.title)
+            .join(Requisition, Requisition.id == CandidateScore.requisition_id, isouter=True)
+            .where(CandidateScore.candidate_id == c.id)).all()],
         "applications": [application_dict(a) for a in db.execute(
             select(JobApplication).where(JobApplication.candidate_id == c.id)).scalars()],
         "calls": [call_dict(cl) for cl in db.execute(
@@ -144,9 +146,10 @@ def detail_request_dict(dr: CandidateDetailRequest) -> dict:
     }
 
 
-def score_dict(s: CandidateScore) -> dict:
+def score_dict(s: CandidateScore, requisition_title: str | None = None) -> dict:
     return {
         "requisition_id": str(s.requisition_id),
+        "requisition_title": requisition_title,
         "total_score": s.total_score,
         "skills_score": s.skills_score,
         "experience_score": s.experience_score,

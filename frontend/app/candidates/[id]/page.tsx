@@ -508,7 +508,7 @@ function ScoresTab({ c }: { c: CandidateDetail }) {
     <Table>
       <THead>
         <TR>
-          <TH>Requisition</TH>
+          <TH>Job</TH>
           <TH>Total</TH>
           <TH>Skills</TH>
           <TH>Experience</TH>
@@ -525,7 +525,7 @@ function ScoresTab({ c }: { c: CandidateDetail }) {
                 href={`/jobs/${s.requisition_id}`}
                 className="text-indigo-600 hover:underline"
               >
-                {s.requisition_id.slice(0, 8)}…
+                {s.requisition_title || `${s.requisition_id.slice(0, 8)}…`}
               </Link>
             </TD>
             <TD className="w-32">

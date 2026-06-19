@@ -162,6 +162,7 @@ export interface CandidateResume {
 
 export interface CandidateScore {
   requisition_id: string;
+  requisition_title?: string | null;
   total_score: number;
   skills_score?: number | null;
   experience_score?: number | null;
