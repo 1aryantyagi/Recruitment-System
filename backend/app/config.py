@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 480
     backend_base_url: str = "http://localhost:8000"
     frontend_base_url: str = "http://localhost:3000"
+    # Browser-facing OAuth redirect base (Gmail "Connect" callback). That callback
+    # is hit by the admin's own browser on this host — it does NOT need the public
+    # internet — so it must stay on the stable local URL even when ngrok rewrites
+    # backend_base_url to a public tunnel (which only Twilio's server-to-server
+    # webhooks need, and which changes every restart on the free ngrok plan). Set
+    # by the tunnel at startup; empty falls back to backend_base_url.
+    oauth_redirect_base_url: str = ""
 
     ngrok_enabled: bool = False
     ngrok_authtoken: str = ""

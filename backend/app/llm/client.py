@@ -51,7 +51,7 @@ def _build_model(tier: str, max_tokens: int):
             api_key=settings.anthropic_api_key,
             temperature=0,
             max_tokens=max_tokens,
-            timeout=60,
+            timeout=120,
         )
     if provider == "openai":
         from langchain_openai import ChatOpenAI
@@ -61,7 +61,7 @@ def _build_model(tier: str, max_tokens: int):
         return ChatOpenAI(
             model=settings.openai_model,
             api_key=settings.openai_api_key,
-            timeout=60,
+            timeout=120,  # reasoning models (e.g. gpt-5) routinely exceed 60s on extraction
             max_retries=0,  # tenacity handles retries below
         )
     raise LLMUnavailable("No LLM provider configured (set OPENAI_API_KEY or ANTHROPIC_API_KEY)")

@@ -45,6 +45,12 @@ def start_tunnel() -> str | None:
         # Prefer https so Twilio signature validation matches the callback scheme.
         if public_url.startswith("http://"):
             public_url = "https://" + public_url[len("http://"):]
+        # Pin the Gmail OAuth redirect to the stable local URL before repointing
+        # backend_base_url at the tunnel: that callback is hit by the admin's
+        # local browser, and the free-plan ngrok host changes every restart, so
+        # tying it to the tunnel would break the registered redirect each boot.
+        if not settings.oauth_redirect_base_url:
+            settings.oauth_redirect_base_url = settings.backend_base_url
         settings.backend_base_url = public_url.rstrip("/")
         log.info("ngrok_tunnel_started", public_url=settings.backend_base_url, port=port)
         return settings.backend_base_url

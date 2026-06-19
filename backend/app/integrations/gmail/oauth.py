@@ -37,7 +37,12 @@ def oauth_client_configured() -> bool:
 
 
 def redirect_uri() -> str:
-    return settings.backend_base_url.rstrip("/") + "/integrations/gmail/callback"
+    # Use the stable local base (set by the tunnel before it rewrites
+    # backend_base_url to the public ngrok host); falls back to backend_base_url
+    # when ngrok is disabled. The OAuth callback is a browser redirect on this
+    # machine, so it never needs the public tunnel URL.
+    base = settings.oauth_redirect_base_url or settings.backend_base_url
+    return base.rstrip("/") + "/integrations/gmail/callback"
 
 
 def _client_config() -> dict:
