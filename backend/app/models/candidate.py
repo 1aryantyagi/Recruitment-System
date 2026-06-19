@@ -22,6 +22,7 @@ from app.database.base import Base
 from app.models.common import created_at_col, fk_col, pk_col, updated_at_col
 from app.models.enums import (
     CandidateSource,
+    DetailRequestStatus,
     shift_preference_enum,
     work_mode_enum,
 )
@@ -67,6 +68,9 @@ class Candidate(Base):
     domain = relationship("Domain")
     skills = relationship("CandidateSkill", cascade="all, delete-orphan")
     resumes = relationship("CandidateResume", back_populates="candidate", cascade="all, delete-orphan")
+    detail_requests = relationship(
+        "CandidateDetailRequest", back_populates="candidate", cascade="all, delete-orphan"
+    )
 
 
 class CandidateResume(Base):
@@ -98,3 +102,35 @@ class CandidateResume(Base):
             postgresql_where=text("gmail_message_id IS NOT NULL"),
         ),
     )
+
+
+class CandidateDetailRequest(Base):
+    """Tracks an auto-sent email asking a candidate for the logistics fields that
+    their resume omitted (current/expected CTC, notice period, availability, shift
+    and work-mode preference), and the parsed reply once it arrives.
+
+    One row per outbound request. The Gmail `thread_id` matches the candidate's
+    reply back to its request; `status` walks SENT → RECEIVED (or FAILED)."""
+
+    __tablename__ = "candidate_detail_requests"
+
+    id = pk_col()
+    candidate_id = fk_col("candidates.id", index=True)
+    gmail_thread_id = Column(String(200), nullable=True, index=True)  # match the reply
+    original_message_id = Column(String(998), nullable=True)  # RFC822 Message-ID for In-Reply-To
+    sent_message_id = Column(String(200), nullable=True)  # id of the email we sent
+    requested_fields = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    status = Column(
+        SAEnum(DetailRequestStatus, name="detail_request_status"),
+        nullable=False,
+        default=DetailRequestStatus.SENT,
+        index=True,
+    )
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+    received_at = Column(DateTime(timezone=True), nullable=True)
+    reply_raw_text = Column(Text, nullable=True)
+    parsed_values = Column(JSONB, nullable=True)
+    created_at = created_at_col()
+    updated_at = updated_at_col()
+
+    candidate = relationship("Candidate", back_populates="detail_requests")

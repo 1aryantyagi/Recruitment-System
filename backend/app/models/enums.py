@@ -48,6 +48,15 @@ class CandidateSource(str, enum.Enum):
     OTHER = "OTHER"
 
 
+class DetailRequestStatus(str, enum.Enum):
+    """candidate_detail_requests.status — lifecycle of an auto-sent request for
+    the logistics fields missing from a resume (CTC, notice, availability, etc.)."""
+
+    SENT = "SENT"          # email sent, awaiting the candidate's reply
+    RECEIVED = "RECEIVED"  # reply parsed and applied to the candidate record
+    FAILED = "FAILED"      # the outbound send failed
+
+
 class SeniorityLevel(str, enum.Enum):
     INTERN = "INTERN"
     JUNIOR = "JUNIOR"

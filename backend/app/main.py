@@ -21,6 +21,7 @@ from app.api.routes import (
     auth,
     candidates,
     files,
+    integrations_gmail,
     interviews,
     meta,
     requisitions,
@@ -103,7 +104,7 @@ async def unhandled_handler(request: Request, exc: Exception):
 # ---------------- Routers ----------------
 for r in (auth.router, candidates.router, requisitions.router, skills.router, meta.router,
           users.router, screening.router, interviews.router, analytics.router,
-          webhooks.router, files.router):
+          webhooks.router, files.router, integrations_gmail.router):
     app.include_router(r)
 
 

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.integrations.storage import local as storage
 from app.models import (
     Candidate,
+    CandidateDetailRequest,
     CandidateResume,
     CandidateScore,
     CandidateSkill,
@@ -126,8 +127,21 @@ def candidate_detail(db: Session, c: Candidate) -> dict:
             select(CallLog).where(CallLog.candidate_id == c.id).order_by(CallLog.called_at.desc())).scalars()],
         "interviews": [interview_dict(i, with_feedback=True, db=db) for i in db.execute(
             select(Interview).where(Interview.candidate_id == c.id).order_by(Interview.round_number)).scalars()],
+        "detail_requests": [detail_request_dict(dr) for dr in db.execute(
+            select(CandidateDetailRequest).where(CandidateDetailRequest.candidate_id == c.id)
+            .order_by(CandidateDetailRequest.created_at.desc())).scalars()],
     })
     return base
+
+
+def detail_request_dict(dr: CandidateDetailRequest) -> dict:
+    return {
+        "id": str(dr.id),
+        "status": _enum(dr.status),
+        "requested_fields": dr.requested_fields or [],
+        "sent_at": _iso(dr.sent_at),
+        "received_at": _iso(dr.received_at),
+    }
 
 
 def score_dict(s: CandidateScore) -> dict:

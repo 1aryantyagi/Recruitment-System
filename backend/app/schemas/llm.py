@@ -30,6 +30,25 @@ class ResumeExtraction(BaseModel):
     summary: str = Field(default="", description="2-3 sentence professional summary of the candidate")
 
 
+# ---------- Detail collection: parse a candidate's email reply ----------
+class CandidateDetailsExtraction(BaseModel):
+    """The logistics fields a candidate supplies by email when their resume omits
+    them. All optional — populate only what the reply actually states."""
+
+    current_ctc: int | None = Field(
+        default=None, description="Annual current CTC in INR (e.g. '15 LPA' -> 1500000)")
+    expected_ctc: int | None = Field(
+        default=None, description="Annual expected CTC in INR (e.g. '20 LPA' -> 2000000)")
+    notice_period_days: int | None = Field(
+        default=None, description="Notice period in days (e.g. '2 months' -> 60, 'immediate' -> 0)")
+    availability_date: str | None = Field(
+        default=None, description="Earliest joining/availability date as ISO YYYY-MM-DD")
+    work_mode_preference: str | None = Field(
+        default=None, description="Preferred work mode: REMOTE | HYBRID | ONSITE")
+    shift_preference: str | None = Field(
+        default=None, description="Preferred shift: DAY | NIGHT | FLEXIBLE")
+
+
 # ---------- Agent 3: live screening conversation ----------
 class ConversationDirective(BaseModel):
     """One turn of the live screening call: what to say next and whether to continue."""

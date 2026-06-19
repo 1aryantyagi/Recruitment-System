@@ -111,7 +111,7 @@ npm run dev                                     # http://localhost:3000
 | Thresholds | `RESUME_SCORE_THRESHOLD`, `CALL_SCORE_THRESHOLD`, `GMAIL_POLL_INTERVAL_MINUTES`                  |
 | Database   | `POSTGRES_HOST`, `POSTGRES_PORT` (5434), `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`     |
 | LLM        | `OPENAI_API_KEY`, `OPENAI_MODEL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (Anthropic wins if set) |
-| Gmail      | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`                               |
+| Gmail      | `GOOGLE_SERVICE_ACCOUNT_JSON`, `GMAIL_IMPERSONATE_EMAIL` (Path A); `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (Path B); `GOOGLE_REFRESH_TOKEN` (legacy) — see [Gmail setup](#gmail-setup) |
 | MS Graph   | `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`                                               |
 | Twilio     | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`                                 |
 | Deepgram   | `DEEPGRAM_API_KEY`                                                                               |
@@ -124,6 +124,47 @@ Gmail/MS keys, those steps are skipped/mocked — the pipeline always completes.
 > **Twilio note:** real outbound calls require a publicly reachable webhook URL.
 > For local testing, expose `:8000` with ngrok and set `BACKEND_BASE_URL` to the
 > public URL (or `NGROK_ENABLED=true`). Without it, screening runs in mock mode.
+
+## Gmail setup
+
+The 5-minute Gmail poll auto-ingests resume attachments. Auth is resolved in
+this order: **service account → DB-stored OAuth token → legacy `.env` refresh
+token**. Access tokens refresh automatically in-process; you never paste a
+short-lived token. Pick one path:
+
+### Path B — OAuth "Connect Gmail" (personal / non-Workspace Gmail) — recommended here
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), enable the
+   **Gmail API** and create an **OAuth 2.0 Client ID** of type **Web application**.
+2. Add the authorized redirect URI: `${BACKEND_BASE_URL}/integrations/gmail/callback`
+   (e.g. `http://localhost:8000/integrations/gmail/callback`).
+3. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
+4. **Publish the OAuth consent screen to Production** (OAuth consent screen →
+   "Publish app"). ⚠️ While the app stays in *Testing* mode, Google expires the
+   refresh token every **7 days** regardless of our code — that 7-day expiry is
+   the original cause of the `invalid_grant` errors. Publishing removes it.
+5. Start the app, sign in as an **Admin**, go to **Admin → Integrations →
+   Connect Gmail**, and complete Google consent. The refresh token is stored
+   **encrypted in Postgres** (`integration_credentials`). Polling now works
+   across restarts with no token in `.env`.
+
+If the token is ever revoked/expired, polling auto-disables (it stops retrying
+and logging every minute) and the Integrations card shows **Needs reconnect** —
+click **Connect Gmail** again to fix it.
+
+### Path A — Google Workspace service account (most durable; no refresh token)
+
+For a Workspace domain only (cannot impersonate a personal `@gmail.com`):
+
+1. Create a **service account** and download its JSON key.
+2. In the Google Workspace **Admin console → Security → API controls →
+   Domain-wide delegation**, authorize the service account's client ID for scope
+   `https://www.googleapis.com/auth/gmail.modify`.
+3. Set `GOOGLE_SERVICE_ACCOUNT_JSON` (path to the key file or inline JSON) and
+   `GMAIL_IMPERSONATE_EMAIL` (the mailbox to read, e.g. `resumes@company.com`).
+
+> **Do not commit secrets:** `.env` and any service-account JSON must stay out of
+> version control. Stored OAuth tokens are encrypted at rest with `ENCRYPTION_KEY`.
 
 ## Tests
 

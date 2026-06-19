@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Plus, UserPlus, Tag } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Plus, UserPlus, Tag, Mail } from "lucide-react";
 import { AppShell, PageHeader } from "@/components/AppShell";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -44,15 +44,22 @@ function AdminContent() {
   const tabs: TabDef[] = [
     { key: "users", label: "Users" },
     { key: "skills", label: "Skills" },
+    { key: "integrations", label: "Integrations" },
   ];
 
   return (
     <div className="space-y-5">
-      <PageHeader title="Admin" description="Manage users and the skill catalog" />
+      <PageHeader title="Admin" description="Manage users, the skill catalog, and integrations" />
       <Card>
         <Tabs tabs={tabs} active={tab} onChange={setTab} className="px-3" />
         <CardBody>
-          {tab === "users" ? <UsersPanel /> : <SkillsPanel />}
+          {tab === "users" ? (
+            <UsersPanel />
+          ) : tab === "skills" ? (
+            <SkillsPanel />
+          ) : (
+            <IntegrationsPanel />
+          )}
         </CardBody>
       </Card>
     </div>
@@ -418,5 +425,129 @@ function AddAliasModal({
         onChange={(e) => setAliases(e.target.value)}
       />
     </Modal>
+  );
+}
+
+type GmailStatus = {
+  configured: boolean;
+  connected: boolean;
+  auth_mode: string;
+  connected_email: string | null;
+  disabled: boolean;
+  last_error: string | null;
+  last_synced_at: string | null;
+  poll_interval_minutes: number;
+  backed_off: boolean;
+};
+
+function IntegrationsPanel() {
+  const toast = useToast();
+  const { data, loading, error, reload } = useFetch<GmailStatus>(
+    () => apiGet<GmailStatus>("/integrations/gmail/status"),
+    [],
+  );
+  const [busy, setBusy] = useState(false);
+
+  // Surface the OAuth callback result (?gmail=connected|error) once on return.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("gmail");
+    if (!result) return;
+    if (result === "connected") toast.success("Gmail connected");
+    else toast.error("Gmail connection failed — please try again");
+    window.history.replaceState({}, "", window.location.pathname);
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function connect() {
+    setBusy(true);
+    try {
+      const { authorization_url } = await apiGet<{ authorization_url: string }>(
+        "/integrations/gmail/connect",
+      );
+      window.location.href = authorization_url;
+    } catch (err) {
+      toast.error((err as Error).message);
+      setBusy(false);
+    }
+  }
+
+  async function disconnect() {
+    setBusy(true);
+    try {
+      await apiPost("/integrations/gmail/disconnect", {});
+      toast.success("Gmail disconnected");
+      reload();
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading) return <LoadingState />;
+  if (error) return <ErrorState message={error} onRetry={reload} />;
+
+  const connected = !!data?.connected && !data?.disabled;
+  const mode = data?.auth_mode ?? "none";
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h4 className="mb-1 text-sm font-semibold text-slate-700">
+          Gmail resume intake
+        </h4>
+        <p className="text-xs text-slate-500">
+          Auto-ingest resumes from unread Gmail messages every{" "}
+          {data?.poll_interval_minutes ?? 5} min.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
+        <Mail className="h-5 w-5 text-slate-400" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            {connected ? (
+              <Badge tone="green">Connected</Badge>
+            ) : data?.disabled ? (
+              <Badge tone="red">Needs reconnect</Badge>
+            ) : (
+              <Badge tone="gray">Not connected</Badge>
+            )}
+            <span className="text-xs text-slate-400">mode: {mode}</span>
+          </div>
+          {data?.connected_email && (
+            <div className="mt-1 truncate text-sm text-slate-600">
+              {data.connected_email}
+            </div>
+          )}
+          {data?.last_error && (
+            <div className="mt-1 truncate text-xs text-red-500">
+              Last error: {data.last_error}
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 gap-2">
+          {mode === "service_account" ? (
+            <span className="text-xs text-slate-400">
+              Configured via service account
+            </span>
+          ) : (
+            <>
+              <Button onClick={connect} loading={busy}>
+                <Mail className="h-4 w-4" />{" "}
+                {connected ? "Reconnect" : "Connect Gmail"}
+              </Button>
+              {(connected || data?.disabled) && (
+                <Button variant="outline" onClick={disconnect} disabled={busy}>
+                  Disconnect
+                </Button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }

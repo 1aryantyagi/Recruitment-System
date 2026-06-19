@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     resume_score_threshold: int = 70
     call_score_threshold: int = 70
     gmail_poll_interval_minutes: int = 5
+    # Auto-email new email applicants for the logistics fields missing from their
+    # resume (CTC, notice, availability, shift/work-mode), and parse their replies.
+    detail_collection_enabled: bool = True
 
     # ---- Database ----
     postgres_host: str = "localhost"
@@ -59,6 +62,13 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-sonnet-4-6"
 
     # ---- Gmail ----
+    # Path A — Google Workspace service account (zero refresh token). When both
+    # are set, this takes precedence over the OAuth paths below.
+    google_service_account_json: str = ""  # path to JSON key file OR inline JSON
+    gmail_impersonate_email: str = ""       # Workspace mailbox to read, e.g. resumes@company.com
+    # Path B — OAuth web client. client_id/secret drive the admin "Connect Gmail"
+    # flow (refresh token stored encrypted in the DB). google_refresh_token is a
+    # legacy .env fallback for the same client.
     google_client_id: str = ""
     google_client_secret: str = ""
     google_refresh_token: str = ""
@@ -117,7 +127,17 @@ class Settings(BaseSettings):
 
     @property
     def gmail_enabled(self) -> bool:
+        """Legacy .env OAuth path: a static refresh token plus its client creds.
+
+        This is only one input to whether Gmail is usable — the broader,
+        DB- and service-account-aware check lives in the Gmail client
+        (`gmail.gmail_configured()`)."""
         return bool(self.google_client_id and self.google_client_secret and self.google_refresh_token)
+
+    @property
+    def gmail_service_account_enabled(self) -> bool:
+        """Path A: a Workspace service account configured to impersonate a mailbox."""
+        return bool(self.google_service_account_json and self.gmail_impersonate_email)
 
     @property
     def ms_graph_enabled(self) -> bool:
