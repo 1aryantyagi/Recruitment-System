@@ -504,11 +504,17 @@ function ResumesTab({
 function ScoresTab({ c }: { c: CandidateDetail }) {
   if (c.scores.length === 0)
     return <EmptyState title="No requisition scores yet" />;
+  // The candidate's current pipeline status for each role they've been scored
+  // against (an application may not exist for every scored requisition).
+  const statusByReq = new Map(
+    c.applications.map((a) => [a.requisition_id, a.status] as const),
+  );
   return (
     <Table>
       <THead>
         <TR>
           <TH>Job</TH>
+          <TH>Status</TH>
           <TH>Total</TH>
           <TH>Skills</TH>
           <TH>Experience</TH>
@@ -527,6 +533,13 @@ function ScoresTab({ c }: { c: CandidateDetail }) {
               >
                 {s.requisition_title || `${s.requisition_id.slice(0, 8)}…`}
               </Link>
+            </TD>
+            <TD>
+              {statusByReq.has(s.requisition_id) ? (
+                <StatusBadge status={statusByReq.get(s.requisition_id)} />
+              ) : (
+                <span className="text-xs text-slate-400">Not applied</span>
+              )}
             </TD>
             <TD className="w-32">
               <ScoreBar value={s.total_score} />
