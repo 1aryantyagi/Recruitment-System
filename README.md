@@ -87,7 +87,7 @@ uvicorn app.main:app --reload --port 8000      # Swagger: http://localhost:8000/
 cd ../frontend
 npm install
 cp .env.local.example .env.local               # NEXT_PUBLIC_API_URL=http://localhost:8000
-npm run dev                                     # http://localhost:3000
+npm run dev                                    # http://localhost:3000
 ```
 
 **Dev logins (seeded):**
@@ -104,17 +104,17 @@ npm run dev                                     # http://localhost:3000
 ## Environment variables
 
 
-| Group      | Variables                                                                                        |
-| ---------- | ------------------------------------------------------------------------------------------------ |
-| App        | `APP_ENV`, `SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `BACKEND_BASE_URL`, `FRONTEND_BASE_URL`  |
-| Encryption | `ENCRYPTION_KEY` (AES-256-GCM for `phone` / `current_ctc` / `expected_ctc`)                      |
-| Thresholds | `RESUME_SCORE_THRESHOLD`, `CALL_SCORE_THRESHOLD`, `GMAIL_POLL_INTERVAL_MINUTES`                  |
-| Database   | `POSTGRES_HOST`, `POSTGRES_PORT` (5434), `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`     |
-| LLM        | `OPENAI_API_KEY`, `OPENAI_MODEL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (Anthropic wins if set) |
+| Group      | Variables                                                                                                                                                                                 |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| App        | `APP_ENV`, `SECRET_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `BACKEND_BASE_URL`, `FRONTEND_BASE_URL`                                                                                           |
+| Encryption | `ENCRYPTION_KEY` (AES-256-GCM for `phone` / `current_ctc` / `expected_ctc`)                                                                                                               |
+| Thresholds | `RESUME_SCORE_THRESHOLD`, `CALL_SCORE_THRESHOLD`, `GMAIL_POLL_INTERVAL_MINUTES`                                                                                                           |
+| Database   | `POSTGRES_HOST`, `POSTGRES_PORT` (5434), `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`                                                                                              |
+| LLM        | `OPENAI_API_KEY`, `OPENAI_MODEL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` (Anthropic wins if set)                                                                                          |
 | Gmail      | `GOOGLE_SERVICE_ACCOUNT_JSON`, `GMAIL_IMPERSONATE_EMAIL` (Path A); `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` (Path B); `GOOGLE_REFRESH_TOKEN` (legacy) — see [Gmail setup](#gmail-setup) |
-| MS Graph   | `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`                                               |
-| Twilio     | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`                                 |
-| Deepgram   | `DEEPGRAM_API_KEY`                                                                               |
+| MS Graph   | `MS_TENANT_ID`, `MS_CLIENT_ID`, `MS_CLIENT_SECRET`                                                                                                                                        |
+| Twilio     | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`                                                                                                                          |
+| Deepgram   | `DEEPGRAM_API_KEY`                                                                                                                                                                        |
 
 
 **Graceful degradation:** every external integration is optional. With no LLM
@@ -135,16 +135,16 @@ short-lived token. Pick one path:
 ### Path B — OAuth "Connect Gmail" (personal / non-Workspace Gmail) — recommended here
 
 1. In the [Google Cloud Console](https://console.cloud.google.com/), enable the
-   **Gmail API** and create an **OAuth 2.0 Client ID** of type **Web application**.
+  **Gmail API** and create an **OAuth 2.0 Client ID** of type **Web application**.
 2. Add the authorized redirect URI: `${BACKEND_BASE_URL}/integrations/gmail/callback`
-   (e.g. `http://localhost:8000/integrations/gmail/callback`).
+  (e.g. `http://localhost:8000/integrations/gmail/callback`).
 3. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
 4. **Publish the OAuth consent screen to Production** (OAuth consent screen →
-   "Publish app"). ⚠️ While the app stays in *Testing* mode, Google expires the
+  "Publish app"). ⚠️ While the app stays in *Testing* mode, Google expires the
    refresh token every **7 days** regardless of our code — that 7-day expiry is
    the original cause of the `invalid_grant` errors. Publishing removes it.
 5. Start the app, sign in as an **Admin**, go to **Admin → Integrations →
-   Connect Gmail**, and complete Google consent. The refresh token is stored
+  Connect Gmail**, and complete Google consent. The refresh token is stored
    **encrypted in Postgres** (`integration_credentials`). Polling now works
    across restarts with no token in `.env`.
 
@@ -158,10 +158,10 @@ For a Workspace domain only (cannot impersonate a personal `@gmail.com`):
 
 1. Create a **service account** and download its JSON key.
 2. In the Google Workspace **Admin console → Security → API controls →
-   Domain-wide delegation**, authorize the service account's client ID for scope
+  Domain-wide delegation**, authorize the service account's client ID for scope
    `https://www.googleapis.com/auth/gmail.modify`.
 3. Set `GOOGLE_SERVICE_ACCOUNT_JSON` (path to the key file or inline JSON) and
-   `GMAIL_IMPERSONATE_EMAIL` (the mailbox to read, e.g. `resumes@company.com`).
+  `GMAIL_IMPERSONATE_EMAIL` (the mailbox to read, e.g. `resumes@company.com`).
 
 > **Do not commit secrets:** `.env` and any service-account JSON must stay out of
 > version control. Stored OAuth tokens are encrypted at rest with `ENCRYPTION_KEY`.

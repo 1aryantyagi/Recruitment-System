@@ -2,9 +2,13 @@
 absent so the screening flow is still fully exercisable in local dev."""
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import re
+import time
 import uuid
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, quoteattr
 
 from app.config import settings
 from app.core.logging import get_logger
@@ -124,3 +128,68 @@ def twiml_say_hangup(message: str) -> str:
         '<?xml version="1.0" encoding="UTF-8"?>'
         f"<Response>{_say(message)}<Hangup/></Response>"
     )
+
+
+# ---------------- Media Streams (low-latency speech-to-speech) ----------------
+# A Twilio Media Streams WebSocket isn't signature-verified the way HTTP webhooks
+# are, so we mint a short-lived HMAC token (over the call_log_id) into the stream
+# URL <Parameter> and verify it on the `start` event in the WS bridge.
+_TOKEN_TTL_SECONDS = 3600
+
+
+def sign_stream_token(call_log_id: str) -> str:
+    """Signed, expiring token binding a media-stream WS to a specific call."""
+    exp = int(time.time()) + _TOKEN_TTL_SECONDS
+    payload = f"{call_log_id}:{exp}"
+    sig = hmac.new(settings.secret_key.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    raw = f"{payload}:{sig}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def verify_stream_token(token: str, call_log_id: str) -> bool:
+    """Validate a token minted by :func:`sign_stream_token` for ``call_log_id``."""
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        cid, exp_s, sig = base64.urlsafe_b64decode(padded.encode()).decode().rsplit(":", 2)
+        if cid != call_log_id or int(exp_s) < int(time.time()):
+            return False
+        expected = hmac.new(settings.secret_key.encode(), f"{cid}:{exp_s}".encode(),
+                            hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, sig)
+    except Exception:
+        return False
+
+
+def twiml_stream(call_log_id: str, ws_url: str | None = None) -> str:
+    """TwiML that bridges the call's audio to our media-stream WebSocket
+    (``<Connect><Stream>``), passing the call id and a signed token as custom
+    parameters. Twilio holds the call open until the WebSocket disconnects."""
+    url = ws_url or f"{settings.public_ws_base_url}/webhooks/twilio/media-stream"
+    token = sign_stream_token(call_log_id)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<Response>"
+        "<Connect>"
+        f"<Stream url={quoteattr(url)}>"
+        f'<Parameter name="call_log_id" value={quoteattr(call_log_id)}/>'
+        f'<Parameter name="token" value={quoteattr(token)}/>'
+        "</Stream>"
+        "</Connect>"
+        "</Response>"
+    )
+
+
+def hangup_call(call_sid: str) -> bool:
+    """End an in-progress call via the REST API (used when the agent decides the
+    screening is complete from inside the media-stream bridge). No-op in mock mode."""
+    if is_mock() or not call_sid:
+        return False
+    try:
+        from twilio.rest import Client
+
+        client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+        client.calls(call_sid).update(twiml="<Response><Hangup/></Response>")
+        return True
+    except Exception as exc:
+        log.warning("twilio_hangup_failed", error=str(exc), call_sid=call_sid)
+        return False

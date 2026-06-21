@@ -99,10 +99,41 @@ class Settings(BaseSettings):
     # Speech-recognition language hint for Twilio <Gather input="speech">.
     stt_language: str = "en-IN"
 
+    # ---- Realtime voice streaming (low-latency speech-to-speech) ----
+    # When true, the screening call streams audio over Twilio Media Streams to
+    # OpenAI Realtime (speech-to-speech), with a parallel Deepgram tap for the
+    # transcript. Off → the legacy turn-based <Gather>/<Say> IVR runs unchanged.
+    voice_streaming_enabled: bool = False
+    # OpenAI Realtime model (GA). Use "gpt-realtime" (most capable) or
+    # "gpt-realtime-mini" (cheaper/faster). The legacy "*-realtime-preview" models
+    # select the now-disabled beta API shape and fail with beta_api_shape_disabled.
+    openai_realtime_model: str = "gpt-realtime"
+    # Realtime voice (distinct from the Polly <Say> voice): alloy, echo, shimmer,
+    # marin, cedar, … (whatever the chosen realtime model supports).
+    realtime_voice: str = "alloy"
+    # server_vad end-of-speech window (ms). Lower = snappier replies but more false
+    # barge-ins; this is the main knob for tuning perceived voice-to-voice latency.
+    realtime_silence_ms: int = 320
+
     # ---- Deepgram ----
     deepgram_api_key: str = ""
+    # Streaming model for the live transcript tap on the candidate's audio. nova-2
+    # is the proven en-IN streaming combo; nova-3 is more accurate where supported.
+    deepgram_live_model: str = "nova-2"
 
     # ---------- Derived helpers ----------
+    @property
+    def public_ws_base_url(self) -> str:
+        """``backend_base_url`` as a WebSocket origin (wss for https), for the
+        Twilio ``<Stream url=…>`` callback. Under ngrok, ``backend_base_url`` is
+        already rewritten to the public https tunnel at startup (tunnel.py)."""
+        base = self.backend_base_url.rstrip("/")
+        if base.startswith("https://"):
+            return "wss://" + base[len("https://"):]
+        if base.startswith("http://"):
+            return "ws://" + base[len("http://"):]
+        return base
+
     @property
     def database_url(self) -> str:
         return (

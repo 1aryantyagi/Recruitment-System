@@ -34,6 +34,7 @@ google-auth==2.40.2
 google-auth-oauthlib==1.2.2
 twilio==9.6.2
 deepgram-sdk==4.1.0
+websockets==16.0  # OpenAI Realtime client for the Media Streams voice bridge
 pyngrok==8.1.2  # local-dev tunnel so Twilio webhooks reach :8000 (NGROK_ENABLED)
 
 # ---- Resume parsing ----

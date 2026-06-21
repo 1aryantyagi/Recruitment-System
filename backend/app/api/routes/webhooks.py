@@ -59,21 +59,32 @@ async def twilio_answer(request: Request):
     sid = form.get("CallSid")
     opening = opening_line()
     db = SessionLocal()
+    streaming_call_id = None
     try:
         call = db.execute(select(CallLog).where(CallLog.twilio_call_sid == sid)).scalar_one_or_none()
         if call is not None:
-            cand = db.get(Candidate, call.candidate_id)
-            role = ""
-            if call.requisition_id:
-                req = db.get(Requisition, call.requisition_id)
-                role = req.title if req else ""
-            opening = opening_line(candidate_name=cand.full_name if cand else "", role=role)
-            call.transcript = f"Agent: {opening}"
-            if call.status == CallStatus.INITIATED:
-                call.status = CallStatus.IN_PROGRESS
-            db.commit()
+            if settings.voice_streaming_enabled:
+                # Hand the call to the Media Streams bridge, which builds the greeting
+                # and transcript itself (speech-to-speech). Don't seed the transcript here.
+                streaming_call_id = str(call.id)
+                if call.status == CallStatus.INITIATED:
+                    call.status = CallStatus.IN_PROGRESS
+                db.commit()
+            else:
+                cand = db.get(Candidate, call.candidate_id)
+                role = ""
+                if call.requisition_id:
+                    req = db.get(Requisition, call.requisition_id)
+                    role = req.title if req else ""
+                opening = opening_line(candidate_name=cand.full_name if cand else "", role=role)
+                call.transcript = f"Agent: {opening}"
+                if call.status == CallStatus.INITIATED:
+                    call.status = CallStatus.IN_PROGRESS
+                db.commit()
     finally:
         db.close()
+    if streaming_call_id is not None:
+        return Response(content=twilio.twiml_stream(streaming_call_id), media_type="application/xml")
     return Response(content=twilio.twiml_gather(opening, _turn_action_url(1)), media_type="application/xml")
 
 

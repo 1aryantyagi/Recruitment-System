@@ -1,6 +1,15 @@
 """Speech-to-text. Prefers Deepgram, falls back to OpenAI Whisper, then to a
-clearly-labeled mock transcript when no STT provider is available (§3.5)."""
+clearly-labeled mock transcript when no STT provider is available (§3.5).
+
+Two modes:
+  • Batch (``transcribe``): post-call, from a recording URL or raw bytes.
+  • Live (``open_live_session``): a streaming WebSocket tap used during a
+    Media-Streams call to build the candidate-side transcript in real time.
+"""
 from __future__ import annotations
+
+import inspect
+from typing import Any, Awaitable, Callable
 
 from app.config import settings
 from app.core.logging import get_logger
@@ -55,4 +64,60 @@ def _whisper(audio_bytes: bytes, filename: str) -> str | None:
         return getattr(resp, "text", None)
     except Exception as exc:
         log.warning("whisper_failed", error=str(exc))
+        return None
+
+
+# ---------------- live streaming (Media Streams tap) ----------------
+OnFinal = Callable[[str], Any] | Callable[[str], Awaitable[None]]
+
+
+async def open_live_session(on_final: OnFinal, *, language: str | None = None):
+    """Open a Deepgram streaming connection for live 8kHz μ-law audio — the format
+    Twilio Media Streams sends. ``on_final(text)`` is called for each finalized
+    transcript segment (may be sync or async). Feed frames with ``await conn.send(bytes)``
+    and end with ``await conn.finish()``. Returns the connection, or ``None`` when
+    Deepgram is unavailable / fails to start (caller then degrades gracefully)."""
+    if not settings.deepgram_enabled:
+        return None
+    try:
+        from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents
+
+        dg = DeepgramClient(settings.deepgram_api_key)
+        conn = dg.listen.asyncwebsocket.v("1")
+
+        async def _on_transcript(_client, result, **_kwargs):
+            try:
+                if not getattr(result, "is_final", False):
+                    return
+                text = (result.channel.alternatives[0].transcript or "").strip()
+                if not text:
+                    return
+                res = on_final(text)
+                if inspect.isawaitable(res):
+                    await res
+            except Exception as exc:
+                log.warning("deepgram_live_transcript_error", error=str(exc))
+
+        async def _on_error(_client, error, **_kwargs):
+            log.warning("deepgram_live_error", error=str(error))
+
+        conn.on(LiveTranscriptionEvents.Transcript, _on_transcript)
+        conn.on(LiveTranscriptionEvents.Error, _on_error)
+
+        options = LiveOptions(
+            model=settings.deepgram_live_model,
+            language=language or settings.stt_language or "en",
+            encoding="mulaw",
+            sample_rate=8000,
+            channels=1,
+            interim_results=True,
+            punctuate=True,
+            smart_format=True,
+        )
+        if not await conn.start(options):
+            log.warning("deepgram_live_start_failed", model=settings.deepgram_live_model)
+            return None
+        return conn
+    except Exception as exc:
+        log.warning("deepgram_live_unavailable", error=str(exc))
         return None
