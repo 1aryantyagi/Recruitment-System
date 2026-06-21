@@ -169,6 +169,7 @@ export interface CandidateScore {
   skills_depth_score?: number | null;
   location_score?: number | null;
   notice_period_score?: number | null;
+  passed_ats?: boolean;
 }
 
 export interface ScoreBreakdown {

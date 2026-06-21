@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.integrations.storage import local as storage
 from app.models import (
     Candidate,
@@ -157,6 +158,10 @@ def score_dict(s: CandidateScore, requisition_title: str | None = None) -> dict:
         "location_score": s.location_score,
         "notice_period_score": s.notice_period_score,
         "scoring_version": s.scoring_version,
+        # Did the resume clear the ATS cutoff? Authoritative pass/fail for the
+        # resume stage (an application row alone is not a reliable signal — one
+        # can exist below the cutoff).
+        "passed_ats": (s.total_score or 0) >= settings.resume_threshold_ratio,
     }
 
 
