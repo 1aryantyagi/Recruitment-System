@@ -189,6 +189,7 @@ export interface CandidateApplication {
 
 export interface CandidateCall {
   id: string;
+  requisition_id?: string | null;
   status: string;
   ai_score?: number | null;
   transcript?: string | null;
@@ -199,6 +200,7 @@ export interface CandidateCall {
 
 export interface CandidateInterview {
   id: string;
+  requisition_id?: string | null;
   round_type: RoundType;
   round_number?: number | null;
   status: InterviewStatus;

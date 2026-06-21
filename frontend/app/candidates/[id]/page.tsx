@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState } from "react";
+import { Fragment, use, useState } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -14,6 +14,7 @@ import {
   ExternalLink,
   PhoneCall,
   CalendarPlus,
+  ChevronRight,
   Ban,
 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
@@ -27,11 +28,13 @@ import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/Table";
 import { useToast } from "@/components/ui/Toast";
 import { SkillsTab } from "@/components/candidates/SkillsTab";
 import { BlacklistModal } from "@/components/candidates/BlacklistModal";
+import { RolePipeline } from "@/components/candidates/RolePipeline";
 import { ScheduleInterviewModal } from "@/components/interviews/ScheduleInterviewModal";
 import { useAuth } from "@/lib/auth";
 import { apiGet, apiPost } from "@/lib/api";
 import { useFetch } from "@/lib/hooks";
 import {
+  cn,
   formatCurrency,
   formatDate,
   formatDateTime,
@@ -502,6 +505,7 @@ function ResumesTab({
 }
 
 function ScoresTab({ c }: { c: CandidateDetail }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
   if (c.scores.length === 0)
     return <EmptyState title="No requisition scores yet" />;
   // The candidate's current pipeline status for each role they've been scored
@@ -510,49 +514,82 @@ function ScoresTab({ c }: { c: CandidateDetail }) {
     c.applications.map((a) => [a.requisition_id, a.status] as const),
   );
   return (
-    <Table>
-      <THead>
-        <TR>
-          <TH>Job</TH>
-          <TH>Status</TH>
-          <TH>Total</TH>
-          <TH>Skills</TH>
-          <TH>Experience</TH>
-          <TH>Depth</TH>
-          <TH>Location</TH>
-          <TH>Notice</TH>
-        </TR>
-      </THead>
-      <TBody>
-        {c.scores.map((s) => (
-          <TR key={s.requisition_id} className="hover:bg-slate-50">
-            <TD>
-              <Link
-                href={`/jobs/${s.requisition_id}`}
-                className="text-indigo-600 hover:underline"
-              >
-                {s.requisition_title || `${s.requisition_id.slice(0, 8)}…`}
-              </Link>
-            </TD>
-            <TD>
-              {statusByReq.has(s.requisition_id) ? (
-                <StatusBadge status={statusByReq.get(s.requisition_id)} />
-              ) : (
-                <span className="text-xs text-slate-400">Not applied</span>
-              )}
-            </TD>
-            <TD className="w-32">
-              <ScoreBar value={s.total_score} />
-            </TD>
-            <TD>{formatNumber(s.skills_score, 1)}</TD>
-            <TD>{formatNumber(s.experience_score, 1)}</TD>
-            <TD>{formatNumber(s.skills_depth_score, 1)}</TD>
-            <TD>{formatNumber(s.location_score, 1)}</TD>
-            <TD>{formatNumber(s.notice_period_score, 1)}</TD>
+    <div className="space-y-2">
+      <p className="text-xs text-slate-400">
+        Click a role to see the candidate&apos;s stage-by-stage progress.
+      </p>
+      <Table>
+        <THead>
+          <TR>
+            <TH className="w-8" />
+            <TH>Job</TH>
+            <TH>Status</TH>
+            <TH>Total</TH>
+            <TH>Skills</TH>
+            <TH>Experience</TH>
+            <TH>Depth</TH>
+            <TH>Location</TH>
+            <TH>Notice</TH>
           </TR>
-        ))}
-      </TBody>
-    </Table>
+        </THead>
+        <TBody>
+          {c.scores.map((s) => {
+            const isOpen = expanded === s.requisition_id;
+            return (
+              <Fragment key={s.requisition_id}>
+                <TR
+                  className="cursor-pointer hover:bg-slate-50"
+                  onClick={() =>
+                    setExpanded(isOpen ? null : s.requisition_id)
+                  }
+                >
+                  <TD className="text-slate-400">
+                    <ChevronRight
+                      className={cn(
+                        "h-4 w-4 transition-transform",
+                        isOpen && "rotate-90",
+                      )}
+                    />
+                  </TD>
+                  <TD>
+                    <Link
+                      href={`/jobs/${s.requisition_id}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-indigo-600 hover:underline"
+                    >
+                      {s.requisition_title ||
+                        `${s.requisition_id.slice(0, 8)}…`}
+                    </Link>
+                  </TD>
+                  <TD>
+                    {statusByReq.has(s.requisition_id) ? (
+                      <StatusBadge status={statusByReq.get(s.requisition_id)} />
+                    ) : (
+                      <span className="text-xs text-slate-400">Not applied</span>
+                    )}
+                  </TD>
+                  <TD className="w-32">
+                    <ScoreBar value={s.total_score} />
+                  </TD>
+                  <TD>{formatNumber(s.skills_score, 1)}</TD>
+                  <TD>{formatNumber(s.experience_score, 1)}</TD>
+                  <TD>{formatNumber(s.skills_depth_score, 1)}</TD>
+                  <TD>{formatNumber(s.location_score, 1)}</TD>
+                  <TD>{formatNumber(s.notice_period_score, 1)}</TD>
+                </TR>
+                {isOpen && (
+                  <TR className="bg-slate-50/50">
+                    <TD colSpan={9} className="px-4 py-3">
+                      <RolePipeline c={c} requisitionId={s.requisition_id} />
+                    </TD>
+                  </TR>
+                )}
+              </Fragment>
+            );
+          })}
+        </TBody>
+      </Table>
+    </div>
   );
 }
 
