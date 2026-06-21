@@ -1,5 +1,6 @@
 """Import all models so Base.metadata is fully populated (used by create_all
 and Alembic). Re-exports the common model classes."""
+from app.models.auth import RefreshToken
 from app.models.candidate import Candidate, CandidateDetailRequest, CandidateResume
 from app.models.integration import IntegrationCredential
 from app.models.interview import CallLog, Interview, InterviewFeedback
@@ -20,6 +21,7 @@ from app.models.skill import CandidateSkill, Skill, SkillAlias
 
 __all__ = [
     "User",
+    "RefreshToken",
     "Domain",
     "Department",
     "Skill",

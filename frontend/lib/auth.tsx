@@ -13,8 +13,9 @@ import {
   apiGet,
   apiPost,
   clearToken,
+  getRefreshToken,
   getToken,
-  setToken,
+  setTokens,
 } from "./api";
 import type { LoginResponse, Role, User } from "./types";
 
@@ -72,13 +73,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email,
       password,
     });
-    setToken(res.access_token);
+    setTokens(res.access_token, res.refresh_token);
     setTokenState(res.access_token);
     setUser(res.user);
     return res.user;
   }, []);
 
   const logout = useCallback(() => {
+    // Best-effort server-side revocation of the refresh token; clear locally
+    // regardless of the result.
+    const refresh = getRefreshToken();
+    if (refresh) {
+      apiPost("/auth/logout", { refresh_token: refresh }).catch(() => {});
+    }
     clearToken();
     setTokenState(null);
     setUser(null);

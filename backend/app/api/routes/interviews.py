@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.agents.feedback_collection import submit_feedback
 from app.agents.interview_scheduling import schedule_interview
 from app.api.serializers import feedback_dict, interview_dict
-from app.core.auth import require_roles
+from app.core.auth import ensure_can_modify, require_roles
 from app.core.errors import BadRequestError, NotFoundError
 from app.core.events import log_audit
 from app.core.responses import Pagination, list_envelope, pagination_params, single
@@ -69,6 +69,7 @@ def update_interview(
     interview = db.get(Interview, _uuid(interview_id))
     if interview is None:
         raise NotFoundError("Interview not found")
+    ensure_can_modify(user, interview.created_by)
     try:
         interview.status = InterviewStatus(body.status)
     except ValueError as exc:
@@ -92,6 +93,7 @@ def upload_recording(
     interview = db.get(Interview, _uuid(interview_id))
     if interview is None:
         raise NotFoundError("Interview not found")
+    ensure_can_modify(user, interview.created_by)
     content = file.file.read()
     log_audit(db, user_id=user.id, action="UPLOADED_RECORDING", entity_type="interview", entity_id=interview.id)
     db.commit()
@@ -108,6 +110,11 @@ def submit_interview_feedback(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles(UserRole.HR)),
 ):
+    interview = db.get(Interview, _uuid(interview_id))
+    if interview is None:
+        raise NotFoundError("Interview not found")
+    # The interview's creator or its assigned interviewer may submit feedback.
+    ensure_can_modify(user, interview.created_by, interview.interviewer_id)
     fb = submit_feedback(interview_id=interview_id, payload=body.model_dump(exclude_unset=True),
                          submitted_by=str(user.id), db=db)
     log_audit(db, user_id=user.id, action="UPDATED_FEEDBACK", entity_type="interview", entity_id=interview_id)

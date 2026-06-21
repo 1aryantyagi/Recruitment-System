@@ -13,6 +13,16 @@ class MsSsoLoginRequest(BaseModel):
     ms_token: str
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class LogoutRequest(BaseModel):
+    # Optional: when supplied, the refresh token is revoked server-side so it
+    # can never be rotated again. Absent → best-effort stateless logout.
+    refresh_token: str | None = None
+
+
 class CreateUserRequest(BaseModel):
     name: str
     email: EmailStr

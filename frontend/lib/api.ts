@@ -8,6 +8,7 @@ export const API_BASE =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 const TOKEN_KEY = "ats_token";
+const REFRESH_KEY = "ats_refresh";
 
 export function getToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -19,9 +20,88 @@ export function setToken(token: string): void {
   window.localStorage.setItem(TOKEN_KEY, token);
 }
 
+export function getRefreshToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(REFRESH_KEY);
+}
+
+export function setRefreshToken(token: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(REFRESH_KEY, token);
+}
+
+/** Persist a fresh access (+ optional refresh) pair, e.g. after login/refresh. */
+export function setTokens(accessToken: string, refreshToken?: string): void {
+  setToken(accessToken);
+  if (refreshToken) setRefreshToken(refreshToken);
+}
+
+/** Clear the whole session (access + refresh). */
 export function clearToken(): void {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(TOKEN_KEY);
+  window.localStorage.removeItem(REFRESH_KEY);
+}
+
+// De-duped refresh: concurrent 401s share one in-flight /auth/refresh call.
+let refreshPromise: Promise<boolean> | null = null;
+
+async function tryRefresh(): Promise<boolean> {
+  if (refreshPromise) return refreshPromise;
+  const rt = getRefreshToken();
+  if (!rt) return false;
+  refreshPromise = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: rt }),
+      });
+      if (!res.ok) {
+        clearToken(); // refresh token dead/revoked → force re-login
+        return false;
+      }
+      const json = await res.json();
+      const data = (json?.data ?? json) as {
+        access_token?: string;
+        refresh_token?: string;
+      };
+      if (data?.access_token) {
+        setTokens(data.access_token, data.refresh_token);
+        return true;
+      }
+      clearToken();
+      return false;
+    } catch {
+      return false;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+  return refreshPromise;
+}
+
+/** fetch() with the Bearer access token; on a 401, transparently rotates the
+ *  refresh token once and retries the original request. */
+async function fetchWithAuth(
+  url: string,
+  init: RequestInit,
+  allowRetry = true,
+): Promise<Response> {
+  const token = getToken();
+  const headers = new Headers(init.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
+  const res = await fetch(url, { ...init, headers });
+
+  // Don't auto-refresh for the login/refresh endpoints themselves.
+  const isAuthExchange =
+    url.includes("/auth/login") || url.includes("/auth/refresh");
+  if (res.status === 401 && allowRetry && !isAuthExchange && getRefreshToken()) {
+    const refreshed = await tryRefresh();
+    if (refreshed) return fetchWithAuth(url, init, false);
+  }
+  return res;
 }
 
 export type QueryValue = string | number | boolean | null | undefined;
@@ -76,9 +156,7 @@ export async function request<T>(
   options: RequestOptions = {},
 ): Promise<T> {
   const { method = "GET", body, query, signal } = options;
-  const token = getToken();
   const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
 
   let payload: BodyInit | undefined;
   if (body instanceof FormData) {
@@ -92,7 +170,7 @@ export async function request<T>(
 
   let res: Response;
   try {
-    res = await fetch(url, { method, headers, body: payload, signal });
+    res = await fetchWithAuth(url, { method, headers, body: payload, signal });
   } catch (e) {
     if ((e as Error)?.name === "AbortError") throw e;
     throw makeError(
@@ -187,14 +265,11 @@ export async function apiList<T>(
   limit: number;
   total_pages: number;
 }> {
-  const token = getToken();
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
   const url = `${API_BASE}${path}${buildQuery(query)}`;
 
   let res: Response;
   try {
-    res = await fetch(url, { headers, signal });
+    res = await fetchWithAuth(url, { method: "GET", signal });
   } catch (e) {
     if ((e as Error)?.name === "AbortError") throw e;
     throw makeError(

@@ -6,14 +6,22 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.serializers import user_public
-from app.core.auth import authenticate_user, create_access_token, get_current_user, require_roles
+from app.core.auth import (
+    authenticate_user,
+    create_access_token,
+    get_current_user,
+    issue_refresh_token,
+    require_roles,
+    revoke_refresh_token,
+    rotate_refresh_token,
+)
 from app.core.errors import AuthenticationError, BadRequestError
 from app.core.events import log_audit
 from app.core.security import hash_password
 from app.database.base import get_db
 from app.models import User
 from app.models.enums import UserRole
-from app.schemas.api import CreateUserRequest, LoginRequest
+from app.schemas.api import CreateUserRequest, LoginRequest, LogoutRequest, RefreshRequest
 from app.core.responses import single
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -24,13 +32,33 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     user = authenticate_user(db, body.email, body.password)
     if user is None:
         raise AuthenticationError("Invalid email or password")
-    token = create_access_token(user)
-    return single({"access_token": token, "token_type": "bearer", "user": user_public(user)})
+    access = create_access_token(user)
+    refresh = issue_refresh_token(db, user)
+    db.commit()
+    return single({
+        "access_token": access,
+        "refresh_token": refresh,
+        "token_type": "bearer",
+        "user": user_public(user),
+    })
+
+
+@router.post("/refresh")
+def refresh(body: RefreshRequest, db: Session = Depends(get_db)):
+    """Exchange a valid refresh token for a new access + refresh pair (rotation)."""
+    user, new_refresh = rotate_refresh_token(db, body.refresh_token)
+    access = create_access_token(user)
+    db.commit()
+    return single({"access_token": access, "refresh_token": new_refresh, "token_type": "bearer"})
 
 
 @router.post("/logout")
-def logout(_: User = Depends(get_current_user)):
-    # Stateless JWT — client discards the token.
+def logout(body: LogoutRequest, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    # Stateless access JWT (client discards it); also revoke the refresh token
+    # server-side when supplied so it can never be rotated again.
+    if body.refresh_token:
+        revoke_refresh_token(db, body.refresh_token)
+        db.commit()
     return single({"success": True})
 
 

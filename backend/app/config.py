@@ -11,7 +11,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# SECRET_KEY values that must never sign tokens in a real deployment.
+_WEAK_SECRETS = {"", "dev-secret-change-me", "dev-secret-change-me-in-production"}
 
 # Repo-root .env (…/Recruitment-System/.env), resolved from this file's location
 # so config loads correctly no matter the current working directory. A
@@ -30,7 +34,10 @@ class Settings(BaseSettings):
     # ---- App ----
     app_env: Literal["development", "staging", "production"] = "development"
     secret_key: str = "dev-secret-change-me"
-    access_token_expire_minutes: int = 480
+    # Short-lived access JWT; the refresh token below keeps sessions alive.
+    access_token_expire_minutes: int = 30
+    # Long-lived, rotated, revocable refresh token (stored hashed in the DB).
+    refresh_token_expire_days: int = 14
     backend_base_url: str = "http://localhost:8000"
     frontend_base_url: str = "http://localhost:3000"
     # Browser-facing OAuth redirect base (Gmail "Connect" callback). That callback
@@ -120,6 +127,26 @@ class Settings(BaseSettings):
     # Streaming model for the live transcript tap on the candidate's audio. nova-2
     # is the proven en-IN streaming combo; nova-3 is more accurate where supported.
     deepgram_live_model: str = "nova-2"
+
+    # ---------- Validation ----------
+    @model_validator(mode="after")
+    def _enforce_prod_secrets(self) -> "Settings":
+        """Fail fast in staging/production if the JWT secret is weak/default.
+
+        A default SECRET_KEY in a real deployment lets anyone forge tokens, so we
+        refuse to boot rather than run insecurely. Dev stays permissive."""
+        if self.app_env in {"staging", "production"}:
+            if self.secret_key.strip() in _WEAK_SECRETS:
+                raise ValueError(
+                    "SECRET_KEY must be set to a strong, unique value in "
+                    f"{self.app_env} (the dev default is not allowed)."
+                )
+            if not self.encryption_key.strip():
+                raise ValueError(
+                    f"ENCRYPTION_KEY must be set in {self.app_env} so encrypted "
+                    "fields don't fall back to a key derived from SECRET_KEY."
+                )
+        return self
 
     # ---------- Derived helpers ----------
     @property

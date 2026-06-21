@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
 from app.core.errors import AppError
@@ -69,9 +70,29 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_base_url, "http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Scoped to what the frontend actually uses rather than a blanket wildcard.
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add baseline security response headers. HSTS only in production (where
+    TLS is terminated upstream); the others are safe everywhere."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        if settings.app_env == "production":
+            response.headers.setdefault(
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+            )
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 # ---------------- Exception handlers → standard error envelope (§4.2) ----------------

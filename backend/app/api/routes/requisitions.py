@@ -12,7 +12,7 @@ from app.agents.common import normalize_skill
 from app.agents.resume_scoring import run_scoring_for_requisition
 from app.api.routes.candidates import build_candidate_query
 from app.api.serializers import candidate_list_item, requisition_dict, score_dict
-from app.core.auth import require_roles
+from app.core.auth import ensure_can_modify, require_roles
 from app.core.errors import BadRequestError, NotFoundError
 from app.core.events import log_audit
 from app.core.responses import Pagination, list_envelope, pagination_params, single
@@ -147,6 +147,7 @@ def update_requisition(
     req = db.get(Requisition, _uuid_or_none(requisition_id))
     if req is None:
         raise NotFoundError("Requisition not found")
+    ensure_can_modify(user, req.created_by, req.hiring_manager_id)
     data = body.model_dump(exclude_unset=True)
     if "status" in data and data["status"]:
         req.status = _enum_or_none(RequisitionStatus, data.pop("status"))

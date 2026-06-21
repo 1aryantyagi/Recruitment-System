@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.agents.resume_intake import run_intake
 from app.agents.resume_scoring import run_scoring_for_candidate
 from app.api.serializers import candidate_detail, candidate_list_item
-from app.core.auth import get_current_user, require_roles
+from app.core.auth import ensure_can_modify, get_current_user, require_roles
 from app.core.errors import AppError, BadRequestError, NotFoundError, UnauthorizedError
 from app.core.events import log_audit, log_event
 from app.core.responses import Pagination, list_envelope, pagination_params, single
@@ -161,9 +161,14 @@ def upload_candidates(
 def upload_resume_version(
     candidate_id: str,
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
     user: User = Depends(require_roles(UserRole.HR)),
 ):
     """Add a new resume version to an existing candidate (max 3 — §4.4)."""
+    cand = db.get(Candidate, _uuid(candidate_id))
+    if cand is None:
+        raise NotFoundError("Candidate not found")
+    ensure_can_modify(user, cand.uploaded_by)
     content = file.file.read()
     res = run_intake(
         file_content=content, file_name=file.filename or "resume",
@@ -183,6 +188,7 @@ def confirm_skills(
     cand = db.get(Candidate, _uuid(candidate_id))
     if cand is None:
         raise NotFoundError("Candidate not found")
+    ensure_can_modify(user, cand.uploaded_by)
     # Confirm
     for sid in body.confirmed_skill_ids:
         cs = db.execute(select(CandidateSkill).filter_by(candidate_id=cand.id, skill_id=_uuid(sid))).scalar_one_or_none()
@@ -262,6 +268,7 @@ def update_candidate(
     cand = db.get(Candidate, _uuid(candidate_id))
     if cand is None:
         raise NotFoundError("Candidate not found")
+    ensure_can_modify(user, cand.uploaded_by)
     data = body.model_dump(exclude_unset=True)
     if "work_mode_preference" in data and data["work_mode_preference"]:
         data["work_mode_preference"] = WorkMode(data["work_mode_preference"])
@@ -301,6 +308,7 @@ def blacklist_candidate(
     cand = db.get(Candidate, _uuid(candidate_id))
     if cand is None:
         raise NotFoundError("Candidate not found")
+    ensure_can_modify(user, cand.uploaded_by)
     cand.is_blacklisted = True
     cand.blacklist_reason_id = _uuid(body.reason_id) if body.reason_id else None
     cand.blacklisted_by = user.id
