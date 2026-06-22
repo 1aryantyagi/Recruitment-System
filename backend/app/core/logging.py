@@ -4,7 +4,7 @@ structlog events are routed through the stdlib ``logging`` system so the SAME
 event reaches multiple handlers at once:
 
   - stdout  : pretty (development) / JSON (staging+production)  -- console
-  - app.log : always JSON, size-rotating                        -- persistent
+  - app.log : pretty, time-stamped (same layout as stdout)      -- persistent
 
 The bound-logger API is unchanged (``get_logger(name).info("event", k=v)``),
 so all existing call sites keep working without edits. This module also exposes
@@ -84,7 +84,7 @@ def _level() -> int:
     return getattr(logging, settings.log_level.upper(), logging.DEBUG)
 
 
-def _build_formatter(json_mode: bool) -> structlog.stdlib.ProcessorFormatter:
+def _build_formatter(*, json_mode: bool = False, colors: bool = True) -> structlog.stdlib.ProcessorFormatter:
     """Build a ProcessorFormatter for a handler.
 
     ``foreign_pre_chain`` runs on records that did NOT originate from structlog
@@ -94,7 +94,7 @@ def _build_formatter(json_mode: bool) -> structlog.stdlib.ProcessorFormatter:
     renderer = (
         structlog.processors.JSONRenderer()
         if json_mode
-        else structlog.dev.ConsoleRenderer(colors=True)
+        else structlog.dev.ConsoleRenderer(colors=colors)
     )
     return structlog.stdlib.ProcessorFormatter(
         foreign_pre_chain=[
@@ -138,7 +138,7 @@ def configure_logging() -> None:
     json_console = settings.app_env != "development"
 
     stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(_build_formatter(json_mode=json_console))
+    stream_handler.setFormatter(_build_formatter(json_mode=json_console, colors=True))
     stream_handler.setLevel(_level())
 
     file_handler = logging.handlers.RotatingFileHandler(
@@ -147,7 +147,7 @@ def configure_logging() -> None:
         backupCount=settings.log_backup_count,
         encoding="utf-8",
     )
-    file_handler.setFormatter(_build_formatter(json_mode=True))  # file is ALWAYS JSON
+    file_handler.setFormatter(_build_formatter(json_mode=False, colors=False))
     file_handler.setLevel(_level())
 
     root = logging.getLogger()
