@@ -22,19 +22,28 @@ _MOCK_PREFIX = "[MOCK TRANSCRIPT — no STT provider configured] "
 def transcribe(*, audio_url: str | None = None, audio_bytes: bytes | None = None,
                filename: str = "audio.mp3") -> str:
     """Transcribe audio from a URL or raw bytes. Always returns a string."""
+    source = "url" if audio_url else ("bytes" if audio_bytes is not None else "none")
+    audio_bytes_len = len(audio_bytes) if audio_bytes is not None else 0
+    log.info("stt.transcribe.start", source=source, audio_bytes=audio_bytes_len)
     if settings.deepgram_enabled:
         text = _deepgram(audio_url=audio_url, audio_bytes=audio_bytes)
         if text:
+            log.info("stt.transcribe.end", provider="deepgram", source=source,
+                     transcript_len=len(text))
             return text
     if settings.openai_api_key and audio_bytes is not None:
         text = _whisper(audio_bytes, filename)
         if text:
+            log.info("stt.transcribe.end", provider="whisper", source=source,
+                     transcript_len=len(text))
             return text
-    return _MOCK_PREFIX + (
+    mock = _MOCK_PREFIX + (
         "Candidate introduced themselves, described their recent projects, "
         "discussed relevant technical experience, and answered the screening "
         "questions with reasonable clarity."
     )
+    log.info("stt.transcribe.end", provider="mock", source=source, transcript_len=len(mock))
+    return mock
 
 
 def _deepgram(*, audio_url: str | None, audio_bytes: bytes | None) -> str | None:
@@ -51,7 +60,7 @@ def _deepgram(*, audio_url: str | None, audio_bytes: bytes | None) -> str | None
             return None
         return resp.results.channels[0].alternatives[0].transcript or None
     except Exception as exc:
-        log.warning("deepgram_failed", error=str(exc))
+        log.warning("deepgram_failed", error=str(exc), exc_info=True)
         return None
 
 
@@ -63,7 +72,7 @@ def _whisper(audio_bytes: bytes, filename: str) -> str | None:
         resp = client.audio.transcriptions.create(model="whisper-1", file=(filename, audio_bytes))
         return getattr(resp, "text", None)
     except Exception as exc:
-        log.warning("whisper_failed", error=str(exc))
+        log.warning("whisper_failed", error=str(exc), exc_info=True)
         return None
 
 
@@ -77,7 +86,10 @@ async def open_live_session(on_final: OnFinal, *, language: str | None = None):
     transcript segment (may be sync or async). Feed frames with ``await conn.send(bytes)``
     and end with ``await conn.finish()``. Returns the connection, or ``None`` when
     Deepgram is unavailable / fails to start (caller then degrades gracefully)."""
+    log.info("stt.open_live_session.start", enabled=settings.deepgram_enabled,
+             language=language or settings.stt_language or "en")
     if not settings.deepgram_enabled:
+        log.info("stt.open_live_session.end", opened=False, reason="disabled")
         return None
     try:
         from deepgram import DeepgramClient, LiveOptions, LiveTranscriptionEvents
@@ -96,7 +108,7 @@ async def open_live_session(on_final: OnFinal, *, language: str | None = None):
                 if inspect.isawaitable(res):
                     await res
             except Exception as exc:
-                log.warning("deepgram_live_transcript_error", error=str(exc))
+                log.warning("deepgram_live_transcript_error", error=str(exc), exc_info=True)
 
         async def _on_error(_client, error, **_kwargs):
             log.warning("deepgram_live_error", error=str(error))
@@ -116,8 +128,12 @@ async def open_live_session(on_final: OnFinal, *, language: str | None = None):
         )
         if not await conn.start(options):
             log.warning("deepgram_live_start_failed", model=settings.deepgram_live_model)
+            log.info("stt.open_live_session.end", opened=False, reason="start_failed",
+                     model=settings.deepgram_live_model)
             return None
+        log.info("stt.open_live_session.end", opened=True, model=settings.deepgram_live_model)
         return conn
     except Exception as exc:
-        log.warning("deepgram_live_unavailable", error=str(exc))
+        log.warning("deepgram_live_unavailable", error=str(exc), exc_info=True)
+        log.info("stt.open_live_session.end", opened=False, reason="exception")
         return None

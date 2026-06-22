@@ -341,6 +341,33 @@ export interface Interviewer {
   is_interviewer: boolean;
 }
 
+// ===== Interviewer scheduling =====
+export interface InterviewerSlot {
+  id: string;
+  interviewer_id: string;
+  slot_time: string; // local "HH:MM"
+  weekday_mask: number; // Mon=bit0 … Sun=bit6
+  duration_minutes: number;
+  is_active: boolean;
+}
+
+export interface RequisitionInterviewer {
+  id: string;
+  requisition_id: string;
+  interviewer: Interviewer | null;
+  created_at?: string | null;
+}
+
+/** A bookable interview slot returned by /requisitions/{id}/open-slots. */
+export interface OpenSlot {
+  interviewer_id: string;
+  interviewer_name: string;
+  start_utc: string; // ISO 8601 UTC
+  start_local: string; // ISO 8601, company-local
+  label: string; // e.g. "Mon 22 Jun, 4:30 PM"
+  duration_minutes: number;
+}
+
 // ===== Interviews =====
 export interface Interview {
   id: string;

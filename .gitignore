@@ -10,6 +10,10 @@ venv/
 # Storage (local-disk resume files)
 backend/storage/
 
+# Logs (app.log + rotated backups)
+backend/logs/
+*.log
+
 # Node
 node_modules/
 .next/

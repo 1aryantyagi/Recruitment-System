@@ -8,9 +8,11 @@ from sqlalchemy import (
     DateTime,
     Enum as SAEnum,
     Float,
+    Index,
     Integer,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -38,6 +40,10 @@ class CallLog(Base):
     transcript = Column(Text, nullable=True)
     screening_answers = Column(JSONB, nullable=True)  # [{question, answer, ai_comment, ai_rating}]
     ai_score = Column(Float, nullable=True)  # 0-1 overall screening score
+    # The live (in-call) qualification judgement from the Realtime voice agent.
+    # NULL = not decided live (legacy/IVR calls); the post-call evaluation treats
+    # an explicit False as authoritative and suppresses the auto-SHORTLIST.
+    qualified = Column(Boolean, nullable=True)
     question_set = Column(JSONB, nullable=True)  # questions asked
     duration_seconds = Column(Integer, nullable=True)
     called_at = created_at_col()
@@ -68,6 +74,22 @@ class Interview(Base):
 
     interviewer = relationship("User", foreign_keys=[interviewer_id])
     feedback = relationship("InterviewFeedback", back_populates="interview", uselist=False, cascade="all, delete-orphan")
+
+    # DB-level defense against double-booking one interviewer at the same instant
+    # (the slot engine also re-checks in app code). Partial: only live rounds with
+    # a concrete interviewer + time can collide.
+    __table_args__ = (
+        Index(
+            "uq_interview_slot_per_interviewer",
+            "interviewer_id",
+            "scheduled_at",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('SCHEDULED','RESCHEDULED') "
+                "AND scheduled_at IS NOT NULL AND interviewer_id IS NOT NULL"
+            ),
+        ),
+    )
 
 
 class InterviewFeedback(Base):

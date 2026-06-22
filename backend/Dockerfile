@@ -15,8 +15,9 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r re
 
 COPY . .
 
-# Storage dir for local-disk resume files
-RUN mkdir -p /app/storage
+# Storage dir for local-disk resume files; logs dir for app.log (also created at
+# runtime by configure_logging(), but pre-creating mirrors the storage pattern).
+RUN mkdir -p /app/storage /app/logs
 
 EXPOSE 8000
 

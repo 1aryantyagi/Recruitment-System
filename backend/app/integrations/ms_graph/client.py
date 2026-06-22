@@ -23,6 +23,7 @@ def is_mock() -> bool:
 
 
 def _app_token() -> str | None:
+    log.debug("ms_graph.acquire_token.start")
     try:
         import msal
 
@@ -32,19 +33,31 @@ def _app_token() -> str | None:
             client_credential=settings.ms_client_secret,
         )
         result = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-        return result.get("access_token")
+        access_token = result.get("access_token")
+        if not access_token:
+            log.warning("ms_graph.acquire_token.end", acquired=False,
+                        error=result.get("error"))
+            return None
+        log.debug("ms_graph.acquire_token.end", acquired=True)
+        return access_token
     except Exception as exc:
-        log.warning("ms_token_failed", error=str(exc))
+        log.warning("ms_token_failed", error=str(exc), exc_info=True)
+        log.warning("ms_graph.acquire_token.error", error=str(exc), exc_info=True)
         return None
 
 
 def create_meeting(*, organizer_email: str, subject: str, start_iso: str, end_iso: str,
                    attendee_emails: list[str], body: str = "") -> dict:
     """Create a Teams online meeting / calendar event. Returns {event_id, join_url, mock}."""
+    log.info("ms_graph.create_meeting.start", organizer=organizer_email,
+             attendee_count=len([e for e in attendee_emails if e]),
+             start=start_iso, end=end_iso)
     if is_mock():
+        log.info("ms_graph.create_meeting.end", mock=True, reason="disabled")
         return _mock_meeting()
     token = _app_token()
     if not token:
+        log.warning("ms_graph.create_meeting.end", mock=True, reason="no_token")
         return _mock_meeting()
     try:
         payload = {
@@ -67,18 +80,26 @@ def create_meeting(*, organizer_email: str, subject: str, start_iso: str, end_is
         resp.raise_for_status()
         data = resp.json()
         join_url = (data.get("onlineMeeting") or {}).get("joinUrl") or data.get("webLink")
+        log.info("ms_graph.create_meeting.end", mock=False, http_status=resp.status_code,
+                 event_id=data.get("id"), has_join_url=bool(join_url))
         return {"event_id": data.get("id"), "join_url": join_url, "mock": False}
     except Exception as exc:
-        log.warning("ms_create_meeting_failed", error=str(exc))
+        log.warning("ms_create_meeting_failed", error=str(exc), exc_info=True)
+        log.warning("ms_graph.create_meeting.error", error=str(exc), mock=True, exc_info=True)
         return _mock_meeting()
 
 
 def get_availability(emails: list[str], start_iso: str, end_iso: str) -> dict:
     """Return getSchedule results, or {} when unavailable."""
+    log.info("ms_graph.get_availability.start", schedule_count=len(emails),
+             start=start_iso, end=end_iso)
     if is_mock():
+        log.info("ms_graph.get_availability.end", mock=True, reason="disabled")
         return {}
     token = _app_token()
     if not token or not emails:
+        log.warning("ms_graph.get_availability.end", mock=True,
+                    reason="no_token" if not token else "no_emails")
         return {}
     try:
         resp = httpx.post(
@@ -93,9 +114,13 @@ def get_availability(emails: list[str], start_iso: str, end_iso: str) -> dict:
             timeout=30,
         )
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        log.info("ms_graph.get_availability.end", mock=False, http_status=resp.status_code,
+                 result_count=len(data.get("value", [])))
+        return data
     except Exception as exc:
-        log.warning("ms_get_schedule_failed", error=str(exc))
+        log.warning("ms_get_schedule_failed", error=str(exc), exc_info=True)
+        log.warning("ms_graph.get_availability.error", error=str(exc), exc_info=True)
         return {}
 
 

@@ -22,10 +22,12 @@ from app.models import (
     Department,
     Domain,
     Interview,
+    InterviewerSlot,
     InterviewFeedback,
     JobApplication,
     PipelineStatusReason,
     Requisition,
+    RequisitionInterviewer,
     RequisitionSkill,
     Skill,
     User,
@@ -279,6 +281,26 @@ def interview_dict(i: Interview, with_feedback: bool = False, db: Session | None
     if with_feedback:
         d["feedback"] = feedback_dict(i.feedback)
     return d
+
+
+def requisition_interviewer_dict(ri: RequisitionInterviewer, interviewer: User | None = None) -> dict:
+    return {
+        "id": str(ri.id),
+        "requisition_id": str(ri.requisition_id),
+        "interviewer": user_public(interviewer),
+        "created_at": _iso(ri.created_at),
+    }
+
+
+def interviewer_slot_dict(s: InterviewerSlot) -> dict:
+    return {
+        "id": str(s.id),
+        "interviewer_id": str(s.interviewer_id),
+        "slot_time": s.slot_time.strftime("%H:%M") if s.slot_time else None,
+        "weekday_mask": s.weekday_mask,
+        "duration_minutes": s.duration_minutes,
+        "is_active": s.is_active,
+    }
 
 
 def domain_dict(d: Domain) -> dict:

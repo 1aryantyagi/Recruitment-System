@@ -8,23 +8,27 @@ from sqlalchemy.orm import Session
 
 from app.api.serializers import department_dict, domain_dict, status_reason_dict
 from app.core.auth import get_current_user, require_roles
+from app.core.logging import get_logger
 from app.core.responses import single
 from app.database.base import get_db
 from app.models import Department, Domain, PipelineStatusReason, User
 from app.models.enums import UserRole
 
 router = APIRouter(tags=["meta"])
+log = get_logger("route.meta")
 
 
 @router.get("/domains")
 def list_domains(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     rows = db.execute(select(Domain).order_by(Domain.name)).scalars().all()
+    log.debug("route.meta.domains", count=len(rows))
     return single([domain_dict(d) for d in rows])
 
 
 @router.get("/departments")
 def list_departments(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     rows = db.execute(select(Department).order_by(Department.name)).scalars().all()
+    log.debug("route.meta.departments", count=len(rows))
     return single([department_dict(d) for d in rows])
 
 
@@ -38,4 +42,5 @@ def list_status_reasons(
     if status:
         stmt = stmt.where(PipelineStatusReason.status == status)
     rows = db.execute(stmt.order_by(PipelineStatusReason.status, PipelineStatusReason.reason)).scalars().all()
+    log.debug("route.meta.status_reasons", count=len(rows), status=status)
     return single([status_reason_dict(r) for r in rows])

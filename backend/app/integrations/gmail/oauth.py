@@ -87,6 +87,8 @@ def verify_state(state: str) -> dict:
 
 
 def authorization_url(admin_id: str) -> str:
+    log.info("gmail.oauth.build_consent_url.start", admin_id=str(admin_id),
+             client_configured=oauth_client_configured())
     flow = _build_flow()
     url, _ = flow.authorization_url(
         access_type="offline",       # request a refresh token
@@ -94,6 +96,9 @@ def authorization_url(admin_id: str) -> str:
         include_granted_scopes="true",
         state=mint_state(admin_id),
     )
+    # Never log the full URL — it carries client_id + scope params. Host only.
+    log.info("gmail.oauth.build_consent_url.end", admin_id=str(admin_id),
+             auth_host=_AUTH_URI.split("/")[2])
     return url
 
 
@@ -104,20 +109,30 @@ def _fetch_email(creds) -> str | None:
         svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
         return svc.users().getProfile(userId="me").execute().get("emailAddress")
     except Exception as exc:
-        log.warning("gmail_profile_fetch_failed", error=str(exc))
+        log.warning("gmail_profile_fetch_failed", error=str(exc), exc_info=True)
         return None
 
 
 def exchange_code(code: str, state: str) -> dict:
     """Validate state, exchange the code, and return token fields (no DB write)."""
+    # NEVER log the authorization code or the returned tokens.
+    log.info("gmail.oauth.exchange_code.start")
     verify_state(state)
     flow = _build_flow()
-    flow.fetch_token(code=code)
+    try:
+        flow.fetch_token(code=code)
+    except Exception:
+        log.error("gmail.oauth.exchange_code.error", exc_info=True)
+        raise
     creds = flow.credentials
+    email = _fetch_email(creds)
+    log.info("gmail.oauth.exchange_code.end", success=True,
+             got_refresh=bool(creds.refresh_token),
+             connected_email=email, scope_count=len(creds.scopes or []))
     return {
         "refresh_token": creds.refresh_token,
         "access_token": creds.token,
         "token_expiry": creds.expiry,
-        "email": _fetch_email(creds),
+        "email": email,
         "scopes": " ".join(creds.scopes) if creds.scopes else None,
     }

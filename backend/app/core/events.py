@@ -11,8 +11,11 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.logging import get_logger
 from app.models import AnalyticsEvent, AuditLog
 from app.models.enums import EventType
+
+log = get_logger("core.events")
 
 
 def log_event(
@@ -33,6 +36,13 @@ def log_event(
         event_metadata=metadata or {},
     )
     db.add(ev)
+    log.info(
+        "core.event",
+        event_type=ev.event_type,
+        candidate_id=str(candidate_id) if candidate_id else None,
+        requisition_id=str(requisition_id) if requisition_id else None,
+        triggered_by=str(triggered_by) if triggered_by else None,
+    )
     return ev
 
 
@@ -47,7 +57,7 @@ def log_audit(
     ip_address: str | None = None,
 ) -> AuditLog:
     """Append an audit-log record. The caller is responsible for committing."""
-    log = AuditLog(
+    audit = AuditLog(
         user_id=user_id,
         action=action,
         entity_type=entity_type,
@@ -55,5 +65,12 @@ def log_audit(
         audit_metadata=metadata or {},
         ip_address=ip_address,
     )
-    db.add(log)
-    return log
+    db.add(audit)
+    log.info(
+        "core.audit",
+        action=action,
+        entity_type=entity_type,
+        entity_id=str(entity_id) if entity_id is not None else None,
+        user_id=str(user_id) if user_id else None,
+    )
+    return audit

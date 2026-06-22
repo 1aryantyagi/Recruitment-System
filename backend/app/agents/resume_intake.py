@@ -20,7 +20,7 @@ from sqlalchemy import func, select, update
 from app.agents.common import map_proficiency, normalize_skill
 from app.core.errors import BadRequestError, DuplicateCandidateError, NotFoundError, ResumeLimitExceededError
 from app.core.events import log_event
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_step
 from app.database.base import SessionLocal
 from app.integrations.storage import local as storage
 from app.llm import client as llm
@@ -81,17 +81,27 @@ def _db(config) -> Any:
 
 
 def validate(state: IntakeState, config) -> dict:
-    if not is_supported(state.get("file_name", ""), state.get("mime_type", "")):
-        raise BadRequestError("Unsupported file type — only PDF and DOCX are accepted")
-    gid = state.get("gmail_message_id")
-    if gid:
-        db = _db(config)
-        exists = db.execute(
-            select(CandidateResume.id).where(CandidateResume.gmail_message_id == gid)
-        ).first()
-        if exists:
-            return {"skip": True, "result": {"skipped": True, "reason": "gmail_message_already_processed"}}
-    return {}
+    with log_step(
+        log,
+        "agent.intake.validate",
+        file_name=state.get("file_name"),
+        mime_type=state.get("mime_type"),
+        source=state.get("source"),
+    ) as step:
+        if not is_supported(state.get("file_name", ""), state.get("mime_type", "")):
+            raise BadRequestError("Unsupported file type — only PDF and DOCX are accepted")
+        gid = state.get("gmail_message_id")
+        if gid:
+            db = _db(config)
+            exists = db.execute(
+                select(CandidateResume.id).where(CandidateResume.gmail_message_id == gid)
+            ).first()
+            if exists:
+                log.info("agent.intake.gmail_dedup", gmail_message_id=gid)
+                step["skip"] = True
+                return {"skip": True, "result": {"skipped": True, "reason": "gmail_message_already_processed"}}
+        step["skip"] = False
+        return {}
 
 
 def _route_validate(state: IntakeState) -> str:
@@ -99,34 +109,63 @@ def _route_validate(state: IntakeState) -> str:
 
 
 def upload(state: IntakeState, config) -> dict:
-    key = storage.save_file(state["file_content"], state.get("file_name", "resume"))
-    return {"file_key": key}
+    with log_step(
+        log,
+        "agent.intake.upload",
+        file_name=state.get("file_name"),
+        size_bytes=len(state.get("file_content") or b""),
+    ) as step:
+        key = storage.save_file(state["file_content"], state.get("file_name", "resume"))
+        step["file_key"] = key
+        return {"file_key": key}
 
 
 def extract_text_node(state: IntakeState, config) -> dict:
-    text, links = extract_document(
-        state["file_content"], state.get("file_name", ""), state.get("mime_type", "")
-    )
-    return {"parsed_text": text, "links": links.to_dict()}
+    with log_step(
+        log,
+        "agent.intake.extract_text",
+        file_name=state.get("file_name"),
+        mime_type=state.get("mime_type"),
+    ) as step:
+        text, links = extract_document(
+            state["file_content"], state.get("file_name", ""), state.get("mime_type", "")
+        )
+        links_dict = links.to_dict()
+        step["text_chars"] = len(text or "")
+        step["link_count"] = sum(1 for v in links_dict.values() if v)
+        return {"parsed_text": text, "links": links_dict}
 
 
 def llm_extract(state: IntakeState, config) -> dict:
     text = (state.get("parsed_text") or "").strip()
     links = state.get("links") or {}
-    if not text or not llm.llm_available():
-        ext = ResumeExtraction(summary="Automated extraction unavailable; review manually.").model_dump()
-        return {"extraction": _reconcile_contacts(ext, links, state)}
-    try:
-        human = (
-            f"Today's date is {date.today().isoformat()}; use it to compute durations and "
-            f'total experience.\n\nRESUME TEXT:\n"""\n{text[:20000]}\n"""'
-        )
-        result = llm.complete_structured("extraction", _EXTRACT_SYSTEM, human, ResumeExtraction)
-        return {"extraction": _reconcile_contacts(result.model_dump(), links, state)}
-    except Exception as exc:
-        log.warning("intake_llm_failed", error=str(exc))
-        ext = ResumeExtraction(summary="Automated extraction failed; review manually.").model_dump()
-        return {"extraction": _reconcile_contacts(ext, links, state)}
+    with log_step(log, "agent.intake.llm_extract", text_chars=len(text)) as step:
+        if not text or not llm.llm_available():
+            log.info(
+                "agent.intake.llm_unavailable",
+                reason="empty_text" if not text else "llm_not_configured",
+            )
+            step["llm_used"] = False
+            ext = ResumeExtraction(summary="Automated extraction unavailable; review manually.").model_dump()
+            return {"extraction": _reconcile_contacts(ext, links, state)}
+        try:
+            human = (
+                f"Today's date is {date.today().isoformat()}; use it to compute durations and "
+                f'total experience.\n\nRESUME TEXT:\n"""\n{text[:20000]}\n"""'
+            )
+            with log_step(log, "agent.intake.llm_extract.call", tier="extraction", prompt_chars=len(human)) as call:
+                result = llm.complete_structured("extraction", _EXTRACT_SYSTEM, human, ResumeExtraction)
+                ext = result.model_dump()
+                call["skill_count"] = len(ext.get("skills") or [])
+                call["has_email"] = bool(ext.get("email"))
+                call["total_experience_years"] = ext.get("total_experience_years")
+            step["llm_used"] = True
+            return {"extraction": _reconcile_contacts(ext, links, state)}
+        except Exception as exc:
+            log.warning("intake_llm_failed", error=str(exc), exc_info=True)
+            step["llm_used"] = False
+            ext = ResumeExtraction(summary="Automated extraction failed; review manually.").model_dump()
+            return {"extraction": _reconcile_contacts(ext, links, state)}
 
 
 def _sender_email(state: IntakeState) -> str | None:
@@ -155,25 +194,35 @@ def _reconcile_contacts(ext: dict, links: dict, state: IntakeState) -> dict:
 
 def normalize(state: IntakeState, config) -> dict:
     db = _db(config)
-    out: list[dict] = []
-    for sk in state["extraction"].get("skills", []):
-        name = sk.get("name") if isinstance(sk, dict) else None
-        if not name:
-            continue
-        skill, is_new = normalize_skill(db, name)
-        if skill is None:
-            continue
-        out.append({
-            "skill_id": str(skill.id),
-            "name": skill.name,
-            "is_new": is_new,
-            "proficiency": sk.get("proficiency"),
-            "years_of_experience": sk.get("years_of_experience"),
-        })
-    return {"normalized": out}
+    raw_skills = state["extraction"].get("skills", [])
+    with log_step(log, "agent.intake.normalize", raw_skill_count=len(raw_skills)) as step:
+        out: list[dict] = []
+        for sk in raw_skills:
+            name = sk.get("name") if isinstance(sk, dict) else None
+            if not name:
+                continue
+            skill, is_new = normalize_skill(db, name)
+            if skill is None:
+                continue
+            out.append({
+                "skill_id": str(skill.id),
+                "name": skill.name,
+                "is_new": is_new,
+                "proficiency": sk.get("proficiency"),
+                "years_of_experience": sk.get("years_of_experience"),
+            })
+        step["normalized_count"] = len(out)
+        step["new_skill_count"] = sum(1 for n in out if n["is_new"])
+        return {"normalized": out}
 
 
 def persist(state: IntakeState, config) -> dict:
+  with log_step(
+      log,
+      "agent.intake.persist",
+      existing_candidate_id=state.get("existing_candidate_id"),
+      skill_count=len(state.get("normalized", [])),
+  ) as step:
     db = _db(config)
     ext = state["extraction"]
     overrides = state.get("overrides") or {}
@@ -190,7 +239,13 @@ def persist(state: IntakeState, config) -> dict:
         version_count = db.scalar(
             select(func.count()).select_from(CandidateResume).where(CandidateResume.candidate_id == candidate.id)
         )
+        log.debug("agent.intake.version_mode", candidate_id=str(candidate.id), version_count=version_count)
         if version_count >= MAX_RESUME_VERSIONS:
+            log.warning(
+                "agent.intake.resume_limit_exceeded",
+                candidate_id=str(candidate.id),
+                version_count=version_count,
+            )
             raise ResumeLimitExceededError(
                 "Candidate already has the maximum number of resume versions",
                 detail=str(candidate.id),
@@ -200,8 +255,10 @@ def persist(state: IntakeState, config) -> dict:
         if not email:
             email = f"unknown+{uuid.uuid4().hex[:10]}@placeholder.local"
             overrides.setdefault("email_missing", True)
+            log.debug("agent.intake.email_missing", placeholder_email=email)
         dup = db.execute(select(Candidate).filter_by(email=email)).scalar_one_or_none()
         if dup is not None:
+            log.info("agent.intake.duplicate_candidate", email=email, existing_candidate_id=str(dup.id))
             raise DuplicateCandidateError(
                 "A candidate with this email already exists", detail=str(dup.id)
             )
@@ -260,25 +317,33 @@ def persist(state: IntakeState, config) -> dict:
         ))
 
     db.flush()
+    step["candidate_id"] = str(candidate.id)
+    step["is_new_candidate"] = is_new
     return {"candidate_id": str(candidate.id), "is_new_candidate": is_new}
 
 
 def emit_analytics(state: IntakeState, config) -> dict:
-    db = _db(config)
-    cand_id = _uuid_or_none(state.get("candidate_id"))
-    log_event(
-        db, EventType.CANDIDATE_ADDED,
-        candidate_id=cand_id,
-        triggered_by=_uuid_or_none(state.get("uploaded_by")),
-        metadata={"source": state.get("source"), "is_new": state.get("is_new_candidate")},
-    )
-    result = {
-        "candidate_id": state.get("candidate_id"),
-        "is_new": state.get("is_new_candidate"),
-        "ai_summary": state["extraction"].get("summary"),
-        "skills": state.get("normalized", []),
-    }
-    return {"result": result}
+    with log_step(
+        log,
+        "agent.intake.emit_analytics",
+        candidate_id=state.get("candidate_id"),
+        is_new=state.get("is_new_candidate"),
+    ):
+        db = _db(config)
+        cand_id = _uuid_or_none(state.get("candidate_id"))
+        log_event(
+            db, EventType.CANDIDATE_ADDED,
+            candidate_id=cand_id,
+            triggered_by=_uuid_or_none(state.get("uploaded_by")),
+            metadata={"source": state.get("source"), "is_new": state.get("is_new_candidate")},
+        )
+        result = {
+            "candidate_id": state.get("candidate_id"),
+            "is_new": state.get("is_new_candidate"),
+            "ai_summary": state["extraction"].get("summary"),
+            "skills": state.get("normalized", []),
+        }
+        return {"result": result}
 
 
 def _uuid_or_none(value):
@@ -354,10 +419,21 @@ def run_intake(
         "overrides": overrides or {},
     }
     try:
-        final = _GRAPH.invoke(state, config={"configurable": {"db": session}})
+        with log_step(
+            log,
+            "agent.intake.run",
+            source=state["source"],
+            file_name=file_name,
+            existing_candidate_id=existing_candidate_id,
+        ) as step:
+            final = _GRAPH.invoke(state, config={"configurable": {"db": session}})
+            result = final.get("result", {})
+            step["skipped"] = bool(result.get("skipped"))
+            step["candidate_id"] = result.get("candidate_id")
+            step["is_new"] = result.get("is_new")
         if own_session:
             session.commit()
-        return final.get("result", {})
+        return result
     except Exception:
         if own_session:
             session.rollback()

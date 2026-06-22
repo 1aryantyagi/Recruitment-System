@@ -14,6 +14,7 @@ from app.api.serializers import candidate_detail, candidate_list_item
 from app.core.auth import ensure_can_modify, get_current_user, require_roles
 from app.core.errors import AppError, BadRequestError, NotFoundError, UnauthorizedError
 from app.core.events import log_audit, log_event
+from app.core.logging import get_logger
 from app.core.responses import Pagination, list_envelope, pagination_params, single
 from app.database.base import get_db
 from app.integrations.storage import local as storage
@@ -31,6 +32,7 @@ from app.agents.common import normalize_skill
 from app.schemas.api import BlacklistRequest, ConfirmSkillsRequest, UpdateCandidateRequest
 
 router = APIRouter(prefix="/candidates", tags=["candidates"])
+log = get_logger("route.candidates")
 
 _ACTIVE_STATUSES = [
     ApplicationStatus.NEW, ApplicationStatus.SCREENING, ApplicationStatus.SHORTLISTED,
@@ -121,6 +123,8 @@ def upload_candidates(
     user: User = Depends(require_roles(UserRole.HR)),
 ):
     """Upload one or many resumes. Each file is processed independently (§6.1)."""
+    log.info("route.candidates.upload.dispatch_background", file_count=len(files),
+             source=source, uploaded_by=str(user.id))
     results = []
     for f in files:
         content = f.file.read()
@@ -140,9 +144,12 @@ def upload_candidates(
                 try:
                     run_scoring_for_candidate(res["candidate_id"])
                 except Exception:
-                    pass
+                    log.warning("route.candidates.upload.scoring_failed",
+                                candidate_id=res.get("candidate_id"), exc_info=True)
             results.append({"filename": f.filename, **res})
         except AppError as exc:
+            log.warning("route.candidates.upload.intake_failed",
+                        filename=f.filename, error=exc.code, message=exc.message)
             results.append({"filename": f.filename, "error": exc.code, "message": exc.message, "detail": exc.detail})
 
     # Audit (best-effort).
@@ -167,9 +174,12 @@ def upload_resume_version(
     """Add a new resume version to an existing candidate (max 3 — §4.4)."""
     cand = db.get(Candidate, _uuid(candidate_id))
     if cand is None:
+        log.warning("route.candidates.resume_version.not_found", candidate_id=candidate_id)
         raise NotFoundError("Candidate not found")
     ensure_can_modify(user, cand.uploaded_by)
     content = file.file.read()
+    log.info("route.candidates.resume_version.dispatch_background",
+             candidate_id=candidate_id, uploaded_by=str(user.id))
     res = run_intake(
         file_content=content, file_name=file.filename or "resume",
         mime_type=file.content_type or "", uploaded_by=str(user.id),
@@ -187,6 +197,7 @@ def confirm_skills(
 ):
     cand = db.get(Candidate, _uuid(candidate_id))
     if cand is None:
+        log.warning("route.candidates.confirm_skills.not_found", candidate_id=candidate_id)
         raise NotFoundError("Candidate not found")
     ensure_can_modify(user, cand.uploaded_by)
     # Confirm
@@ -213,6 +224,9 @@ def confirm_skills(
     log_audit(db, user_id=user.id, action="CONFIRMED_SKILLS", entity_type="candidate", entity_id=cand.id)
     db.commit()
     db.refresh(cand)
+    log.info("route.candidates.skills_confirmed", candidate_id=str(cand.id),
+             confirmed=len(body.confirmed_skill_ids), removed=len(body.removed_skill_ids),
+             added=len(body.added_skill_names), confirmed_by=str(user.id))
     return single(candidate_detail(db, cand))
 
 
@@ -234,8 +248,10 @@ def list_candidates(
     user: User = Depends(get_current_user),
 ):
     if blacklisted and user.role != UserRole.ADMIN:
+        log.warning("route.candidates.list.blacklist_forbidden", user_id=str(user.id), role=str(user.role))
         raise UnauthorizedError("Only Admin can view blacklisted candidates")
     if user.role not in (UserRole.HR, UserRole.DELIVERY_MANAGER, UserRole.ADMIN):
+        log.warning("route.candidates.list.forbidden", user_id=str(user.id), role=str(user.role))
         raise UnauthorizedError("Insufficient role")
     stmt = build_candidate_query(
         db, skills=skills, min_exp=min_exp, max_exp=max_exp, domain_id=domain_id,
@@ -243,6 +259,8 @@ def list_candidates(
         source=source, search=search, stage=stage, blacklisted=blacklisted,
     )
     rows, total = _paginate(db, stmt, pagination)
+    log.debug("route.candidates.list", total=total, returned=len(rows),
+              blacklisted=blacklisted, search=search)
     return list_envelope([candidate_list_item(c) for c in rows], total, pagination.page, pagination.limit)
 
 
@@ -254,6 +272,7 @@ def get_candidate(
 ):
     cand = db.get(Candidate, _uuid(candidate_id))
     if cand is None:
+        log.warning("route.candidates.get.not_found", candidate_id=candidate_id)
         raise NotFoundError("Candidate not found")
     return single(candidate_detail(db, cand))
 
@@ -267,6 +286,7 @@ def update_candidate(
 ):
     cand = db.get(Candidate, _uuid(candidate_id))
     if cand is None:
+        log.warning("route.candidates.update.not_found", candidate_id=candidate_id)
         raise NotFoundError("Candidate not found")
     ensure_can_modify(user, cand.uploaded_by)
     data = body.model_dump(exclude_unset=True)
@@ -293,7 +313,9 @@ def get_resume_url(
         .order_by(CandidateResume.is_latest.desc(), CandidateResume.uploaded_at.desc())
     ).scalars().first()
     if resume is None or not resume.file_url:
+        log.warning("route.candidates.resume_url.not_found", candidate_id=candidate_id)
         raise NotFoundError("No resume file available")
+    log.info("route.candidates.resume_url.issued", candidate_id=candidate_id, user_id=str(user.id))
     return single({"url": storage.signed_url(resume.file_url)})
 
 
@@ -307,6 +329,7 @@ def blacklist_candidate(
 ):
     cand = db.get(Candidate, _uuid(candidate_id))
     if cand is None:
+        log.warning("route.candidates.blacklist.not_found", candidate_id=candidate_id)
         raise NotFoundError("Candidate not found")
     ensure_can_modify(user, cand.uploaded_by)
     cand.is_blacklisted = True
@@ -329,6 +352,8 @@ def blacklist_candidate(
               metadata={"dropped_applications": len(apps)}, ip_address=request.client.host if request.client else None)
     db.commit()
     db.refresh(cand)
+    log.info("route.candidates.blacklisted", candidate_id=str(cand.id),
+             dropped_applications=len(apps), blacklisted_by=str(user.id))
     return single(candidate_detail(db, cand))
 
 
@@ -341,6 +366,7 @@ def unblacklist_candidate(
 ):
     cand = db.get(Candidate, _uuid(candidate_id))
     if cand is None:
+        log.warning("route.candidates.unblacklist.not_found", candidate_id=candidate_id)
         raise NotFoundError("Candidate not found")
     cand.is_blacklisted = False
     cand.blacklist_reason_id = None
@@ -351,6 +377,7 @@ def unblacklist_candidate(
               ip_address=request.client.host if request.client else None)
     db.commit()
     db.refresh(cand)
+    log.info("route.candidates.unblacklisted", candidate_id=str(cand.id), removed_by=str(user.id))
     return single(candidate_detail(db, cand))
 
 

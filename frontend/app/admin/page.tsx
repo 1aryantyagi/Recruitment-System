@@ -19,6 +19,7 @@ import { useFetch } from "@/lib/hooks";
 import { useSkills } from "@/lib/meta";
 import { titleCase } from "@/lib/utils";
 import type { User, Skill } from "@/lib/types";
+import { InterviewerSlotsPanel } from "@/components/admin/InterviewerSlotsPanel";
 
 export default function AdminPage() {
   return (
@@ -43,6 +44,7 @@ function AdminContent() {
 
   const tabs: TabDef[] = [
     { key: "users", label: "Users" },
+    { key: "slots", label: "Interviewer Slots" },
     { key: "skills", label: "Skills" },
     { key: "integrations", label: "Integrations" },
   ];
@@ -55,6 +57,8 @@ function AdminContent() {
         <CardBody>
           {tab === "users" ? (
             <UsersPanel />
+          ) : tab === "slots" ? (
+            <InterviewerSlotsPanel />
           ) : tab === "skills" ? (
             <SkillsPanel />
           ) : (

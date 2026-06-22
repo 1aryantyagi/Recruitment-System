@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
+from app.core.logging import get_logger, log_step
 from app.llm import client as llm
 from app.models import (
     Candidate,
@@ -23,6 +24,8 @@ from app.models import (
     Requisition,
 )
 from app.models.enums import ApplicationStatus, CallStatus, RequisitionStatus
+
+log = get_logger("agent.analytics")
 
 FUNNEL_STAGES = [
     ApplicationStatus.NEW,
@@ -115,9 +118,12 @@ def time_to_hire(db: Session) -> dict[str, Any]:
 
 
 def requisition_analytics(db: Session, requisition_id: str) -> dict[str, Any]:
+  with log_step(log, "agent.analytics.requisition_analytics", requisition_id=str(requisition_id)) as step:
     rid = uuid.UUID(str(requisition_id))
     req = db.get(Requisition, rid)
     if req is None:
+        log.debug("agent.analytics.requisition_not_found", requisition_id=str(requisition_id))
+        step["found"] = False
         return {}
     status_rows = db.execute(
         select(JobApplication.status, func.count())
@@ -127,6 +133,9 @@ def requisition_analytics(db: Session, requisition_id: str) -> dict[str, Any]:
         select(CandidateScore.total_score).where(CandidateScore.requisition_id == rid)
     ).scalars().all()
     interviews = db.scalar(select(func.count()).select_from(Interview).where(Interview.requisition_id == rid))
+    step["found"] = True
+    step["scored_candidates"] = len(score_rows)
+    step["interviews"] = int(interviews or 0)
     return {
         "requisition_id": str(rid),
         "title": req.title,
@@ -138,6 +147,7 @@ def requisition_analytics(db: Session, requisition_id: str) -> dict[str, Any]:
 
 
 def dashboard(db: Session) -> dict[str, Any]:
+  with log_step(log, "agent.analytics.dashboard") as step:
     totals = {
         "candidates": int(db.scalar(select(func.count()).select_from(Candidate)) or 0),
         "open_requisitions": int(
@@ -153,6 +163,16 @@ def dashboard(db: Session) -> dict[str, Any]:
         ),
     }
     f = funnel(db)
+    log.debug(
+        "agent.analytics.dashboard.totals",
+        candidates=totals["candidates"],
+        open_requisitions=totals["open_requisitions"],
+        applications=totals["applications"],
+        interviews=totals["interviews"],
+    )
+    step["candidates"] = totals["candidates"]
+    step["applications"] = totals["applications"]
+    step["hire_rate"] = f["hire_rate"]
     return {
         "totals": totals,
         "funnel": f["stages"],
@@ -165,13 +185,23 @@ def dashboard(db: Session) -> dict[str, Any]:
 
 def digest(db: Session) -> str:
     """Optional natural-language summary of the dashboard (short-tier LLM)."""
-    data = dashboard(db)
-    if not llm.llm_available():
-        return "LLM digest unavailable."
-    try:
-        import json
+    with log_step(log, "agent.analytics.digest") as step:
+        data = dashboard(db)
+        if not llm.llm_available():
+            log.info("agent.analytics.digest_llm_unavailable")
+            step["llm_used"] = False
+            return "LLM digest unavailable."
+        try:
+            import json
 
-        system = "Summarize the recruitment pipeline dashboard in 3-4 crisp sentences for an HR leader."
-        return llm.complete_text("short", system, json.dumps(data)[:6000])
-    except Exception:
-        return "LLM digest unavailable."
+            payload = json.dumps(data)[:6000]
+            system = "Summarize the recruitment pipeline dashboard in 3-4 crisp sentences for an HR leader."
+            with log_step(log, "agent.analytics.digest.call", tier="short", payload_chars=len(payload)) as call:
+                result = llm.complete_text("short", system, payload)
+                call["result_chars"] = len(result or "")
+            step["llm_used"] = True
+            return result
+        except Exception as exc:
+            log.warning("agent.analytics.digest_failed", error=str(exc), exc_info=True)
+            step["llm_used"] = False
+            return "LLM digest unavailable."

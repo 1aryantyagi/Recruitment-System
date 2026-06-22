@@ -17,6 +17,7 @@ from app.models.requisition import (
     Requisition,
     RequisitionSkill,
 )
+from app.models.scheduling import InterviewerSlot, RequisitionInterviewer
 from app.models.skill import CandidateSkill, Skill, SkillAlias
 
 __all__ = [
@@ -35,6 +36,8 @@ __all__ = [
     "RequisitionSkill",
     "JobApplication",
     "CandidateScore",
+    "RequisitionInterviewer",
+    "InterviewerSlot",
     "CallLog",
     "Interview",
     "InterviewFeedback",

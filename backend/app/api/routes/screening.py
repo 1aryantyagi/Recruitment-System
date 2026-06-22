@@ -12,6 +12,7 @@ from app.api.serializers import call_dict
 from app.core.auth import require_roles
 from app.core.errors import BadRequestError, NotFoundError
 from app.core.events import log_audit
+from app.core.logging import get_logger
 from app.core.responses import Pagination, list_envelope, pagination_params, single
 from app.database.base import get_db
 from app.models import Candidate, CallLog, User
@@ -20,6 +21,7 @@ from app.schemas.api import StartCallRequest
 from app.services import flow
 
 router = APIRouter(tags=["screening"])
+log = get_logger("route.screening")
 
 
 @router.post("/screening/start-call")
@@ -31,6 +33,7 @@ def start_screening_call(
 ):
     cand = db.get(Candidate, _uuid(body.candidate_id))
     if cand is None:
+        log.warning("route.screening.start_call.candidate_not_found", candidate_id=body.candidate_id)
         raise NotFoundError("Candidate not found")
 
     result = start_call(candidate_id=body.candidate_id, requisition_id=body.requisition_id,
@@ -38,11 +41,15 @@ def start_screening_call(
     log_audit(db, user_id=user.id, action="STARTED_SCREENING_CALL", entity_type="candidate",
               entity_id=cand.id, metadata={"call_log_id": result.get("call_log_id")})
     db.commit()
+    log.info("route.screening.start_call", candidate_id=body.candidate_id,
+             requisition_id=body.requisition_id, call_log_id=result.get("call_log_id"),
+             mock=bool(result.get("mock")), initiated_by=str(user.id))
 
     # In mock mode there is no live Twilio call/webhook — process immediately so
     # the screening flow completes end-to-end with a mock transcript.
     if result.get("mock") and result.get("call_log_id"):
         background.add_task(flow.run_screening_processing, result["call_log_id"], None)
+        log.info("route.screening.start_call.dispatch_background", call_log_id=result["call_log_id"])
 
     return single({**result, "status": "INITIATED"})
 

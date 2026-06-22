@@ -48,6 +48,19 @@ class Settings(BaseSettings):
     # by the tunnel at startup; empty falls back to backend_base_url.
     oauth_redirect_base_url: str = ""
 
+    # ---- Logging ----
+    # Verbosity for BOTH stdout and app.log. DEBUG captures the technical traces
+    # (step start/end, durations, external-call summaries); drop to INFO if noisy.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "DEBUG"
+    # Directory for log files. Resolves to <backend>/logs locally and /app/logs in
+    # the Docker image (WORKDIR=/app). Override with LOG_DIR. Created on startup.
+    log_dir: str = str(Path(__file__).resolve().parents[1] / "logs")
+    # Log filename (joined to log_dir unless an absolute path is given).
+    log_file: str = "app.log"
+    # Rotate at ~10 MB, keep 5 backups (app.log + app.log.1 .. app.log.5).
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_backup_count: int = 5
+
     ngrok_enabled: bool = False
     ngrok_authtoken: str = ""
 
@@ -99,6 +112,10 @@ class Settings(BaseSettings):
 
     # ---- Screening voice agent ----
     company_name: str = "Intelera"
+    # IANA timezone the company books interviews in. Interviewer slot times
+    # (e.g. 16:30) are interpreted as local to this zone; `interviews.scheduled_at`
+    # is always stored in UTC. Used by the interviewer-slot engine.
+    company_timezone: str = "Asia/Kolkata"
     # Caller persona name spoken in the intro; blank → "the talent team".
     screening_agent_name: str = ""
     # Amazon Polly Indian-English neural voice for a natural-sounding call.

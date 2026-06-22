@@ -23,12 +23,14 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.errors import AuthenticationError, UnauthorizedError
+from app.core.logging import get_logger
 from app.database.base import get_db
 from app.models import RefreshToken, User
 from app.models.enums import UserRole
 
 ALGORITHM = "HS256"
 _bearer = HTTPBearer(auto_error=False)
+log = get_logger("core.auth")
 
 
 def _role_str(user: User) -> str:
@@ -61,15 +63,22 @@ def get_current_user(
 ) -> User:
     if creds is None or not creds.credentials:
         raise AuthenticationError("Authentication required")
-    payload = decode_token(creds.credentials)
+    try:
+        payload = decode_token(creds.credentials)
+    except AuthenticationError:
+        log.warning("core.auth.token_invalid")
+        raise
     sub = payload.get("sub")
     try:
         user_id = uuid.UUID(str(sub))
     except (ValueError, TypeError) as exc:
+        log.warning("core.auth.token_malformed_subject")
         raise AuthenticationError("Malformed token subject") from exc
     user = db.get(User, user_id)
     if user is None or not user.is_active:
+        log.warning("core.auth.user_inactive_or_missing", user_id=str(user_id))
         raise AuthenticationError("User not found or inactive")
+    log.debug("core.auth.token_decoded", user_id=str(user.id), role=_role_str(user))
     return user
 
 
@@ -78,11 +87,24 @@ def require_roles(*roles: UserRole):
     allowed = {r.value for r in roles}
 
     def _dep(user: User = Depends(get_current_user)) -> User:
-        if _role_str(user) not in allowed:
+        actual = _role_str(user)
+        if actual not in allowed:
+            log.warning(
+                "core.auth.role_denied",
+                user_id=str(user.id),
+                actual_role=actual,
+                required_roles=sorted(allowed),
+            )
             raise UnauthorizedError(
                 "Insufficient role for this operation",
                 detail=f"requires one of {sorted(allowed)}",
             )
+        log.debug(
+            "core.auth.role_allowed",
+            user_id=str(user.id),
+            actual_role=actual,
+            required_roles=sorted(allowed),
+        )
         return user
 
     return _dep

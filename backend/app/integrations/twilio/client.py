@@ -51,12 +51,19 @@ def is_mock() -> bool:
 
 def start_call(to_number: str, answer_url: str, status_callback: str | None = None) -> dict:
     """Place an outbound screening call. Returns {sid, mock}."""
+    log.info("twilio.start_call.start", to=to_number, answer_url=answer_url,
+             status_callback=status_callback)
     if is_mock():
-        return {"sid": f"MOCK-{uuid.uuid4().hex[:12]}", "mock": True}
+        sid = f"MOCK-{uuid.uuid4().hex[:12]}"
+        log.info("twilio.start_call.end", mock=True, reason="disabled", twilio_sid=sid)
+        return {"sid": sid, "mock": True}
     number = to_e164(to_number)
     if not number.startswith("+") or len(number) < 8:
         log.warning("twilio_invalid_phone", raw=to_number, normalized=number)
-        return {"sid": f"MOCK-{uuid.uuid4().hex[:12]}", "mock": True,
+        sid = f"MOCK-{uuid.uuid4().hex[:12]}"
+        log.warning("twilio.start_call.end", mock=True, reason="invalid_phone",
+                    twilio_sid=sid, normalized=number)
+        return {"sid": sid, "mock": True,
                 "error": f"invalid phone number: {to_number!r}"}
     try:
         from twilio.rest import Client
@@ -70,22 +77,29 @@ def start_call(to_number: str, answer_url: str, status_callback: str | None = No
             status_callback=status_callback,
             status_callback_event=["completed"],
         )
+        log.info("twilio.start_call.end", mock=False, to=number, twilio_sid=call.sid)
         return {"sid": call.sid, "mock": False}
     except Exception as exc:
-        log.warning("twilio_call_failed", error=str(exc))
-        return {"sid": f"MOCK-{uuid.uuid4().hex[:12]}", "mock": True, "error": str(exc)}
+        log.warning("twilio_call_failed", error=str(exc), exc_info=True)
+        sid = f"MOCK-{uuid.uuid4().hex[:12]}"
+        log.warning("twilio.start_call.error", error=str(exc), mock=True,
+                    twilio_sid=sid, exc_info=True)
+        return {"sid": sid, "mock": True, "error": str(exc)}
 
 
 def validate_signature(url: str, params: dict, signature: str | None) -> bool:
     """Verify the Twilio request signature (§12). In mock mode, accept."""
     if is_mock():
+        log.debug("twilio.validate_signature", mock=True, valid=True)
         return True
     try:
         from twilio.request_validator import RequestValidator
 
-        return RequestValidator(settings.twilio_auth_token).validate(url, params, signature or "")
+        valid = RequestValidator(settings.twilio_auth_token).validate(url, params, signature or "")
+        log.debug("twilio.validate_signature", mock=False, valid=valid)
+        return valid
     except Exception as exc:
-        log.warning("twilio_signature_check_failed", error=str(exc))
+        log.warning("twilio_signature_check_failed", error=str(exc), exc_info=True)
         return False
 
 
@@ -152,11 +166,17 @@ def verify_stream_token(token: str, call_log_id: str) -> bool:
         padded = token + "=" * (-len(token) % 4)
         cid, exp_s, sig = base64.urlsafe_b64decode(padded.encode()).decode().rsplit(":", 2)
         if cid != call_log_id or int(exp_s) < int(time.time()):
+            log.debug("twilio.verify_stream_token", call_log_id=call_log_id, valid=False,
+                      reason="mismatch_or_expired")
             return False
         expected = hmac.new(settings.secret_key.encode(), f"{cid}:{exp_s}".encode(),
                             hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected, sig)
+        valid = hmac.compare_digest(expected, sig)
+        log.debug("twilio.verify_stream_token", call_log_id=call_log_id, valid=valid)
+        return valid
     except Exception:
+        log.debug("twilio.verify_stream_token", call_log_id=call_log_id, valid=False,
+                  reason="decode_error", exc_info=True)
         return False
 
 
@@ -166,6 +186,7 @@ def twiml_stream(call_log_id: str, ws_url: str | None = None) -> str:
     parameters. Twilio holds the call open until the WebSocket disconnects."""
     url = ws_url or f"{settings.public_ws_base_url}/webhooks/twilio/media-stream"
     token = sign_stream_token(call_log_id)
+    log.debug("twilio.twiml_stream", call_log_id=call_log_id, ws_url=url)
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response>"
@@ -182,14 +203,20 @@ def twiml_stream(call_log_id: str, ws_url: str | None = None) -> str:
 def hangup_call(call_sid: str) -> bool:
     """End an in-progress call via the REST API (used when the agent decides the
     screening is complete from inside the media-stream bridge). No-op in mock mode."""
+    log.info("twilio.hangup_call.start", twilio_sid=call_sid)
     if is_mock() or not call_sid:
+        log.info("twilio.hangup_call.end", hung_up=False,
+                 reason="disabled" if is_mock() else "no_sid", twilio_sid=call_sid)
         return False
     try:
         from twilio.rest import Client
 
         client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
         client.calls(call_sid).update(twiml="<Response><Hangup/></Response>")
+        log.info("twilio.hangup_call.end", hung_up=True, twilio_sid=call_sid)
         return True
     except Exception as exc:
-        log.warning("twilio_hangup_failed", error=str(exc), call_sid=call_sid)
+        log.warning("twilio_hangup_failed", error=str(exc), call_sid=call_sid, exc_info=True)
+        log.warning("twilio.hangup_call.error", error=str(exc), twilio_sid=call_sid,
+                    exc_info=True)
         return False

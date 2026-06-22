@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from app.core.errors import BadRequestError, NotFoundError
 from app.core.events import log_event
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_step
 from app.database.base import SessionLocal
 from app.integrations.ms_graph import client as graph
 from app.models import Candidate, Interview, JobApplication, Requisition, User
@@ -42,87 +42,166 @@ def _db(config) -> Any:
     return config["configurable"]["db"]
 
 
+# Assumed interview length when checking whether an interviewer is double-booked.
+_INTERVIEW_MINUTES = 60
+
+
 def validate_no_duplicate_round(state: ScheduleState, config) -> dict:
-    db = _db(config)
-    cid = uuid.UUID(state["candidate_id"])
-    rtype = RoundType(state["round_type"])
-    q = select(Interview.id).where(
-        Interview.candidate_id == cid,
-        Interview.round_type == rtype,
-        Interview.status.in_([InterviewStatus.SCHEDULED, InterviewStatus.RESCHEDULED]),
-    )
-    if state.get("requisition_id"):
-        q = q.where(Interview.requisition_id == uuid.UUID(state["requisition_id"]))
-    if db.execute(q).first():
-        raise BadRequestError(f"A {rtype.value} round is already scheduled for this candidate")
-    return {}
+    with log_step(log, "scheduling.validate_no_duplicate_round",
+                  candidate_id=state.get("candidate_id"),
+                  requisition_id=state.get("requisition_id"),
+                  interviewer_id=state.get("interviewer_id"),
+                  round_type=state.get("round_type")) as step:
+        db = _db(config)
+        cid = uuid.UUID(state["candidate_id"])
+        rtype = RoundType(state["round_type"])
+        q = select(Interview.id).where(
+            Interview.candidate_id == cid,
+            Interview.round_type == rtype,
+            Interview.status.in_([InterviewStatus.SCHEDULED, InterviewStatus.RESCHEDULED]),
+        )
+        if state.get("requisition_id"):
+            q = q.where(Interview.requisition_id == uuid.UUID(state["requisition_id"]))
+        duplicate = db.execute(q).first() is not None
+        step["duplicate_round_found"] = duplicate
+        log.debug("scheduling.validate_no_duplicate_round.duplicate_check",
+                  round_type=rtype.value, duplicate_found=duplicate)
+        if duplicate:
+            log.warning("scheduling.validate_no_duplicate_round.duplicate_round",
+                        candidate_id=str(cid), round_type=rtype.value)
+            raise BadRequestError(f"A {rtype.value} round is already scheduled for this candidate")
+
+        # Don't double-book the interviewer: reject if they already have an active
+        # round overlapping this time (assuming ~1h interviews).
+        interviewer_id = state.get("interviewer_id")
+        scheduled_at = _parse_dt(state.get("scheduled_at"))
+        if interviewer_id and scheduled_at:
+            window = dt.timedelta(minutes=_INTERVIEW_MINUTES)
+            clash = db.execute(
+                select(Interview.id).where(
+                    Interview.interviewer_id == uuid.UUID(interviewer_id),
+                    Interview.status.in_([InterviewStatus.SCHEDULED, InterviewStatus.RESCHEDULED]),
+                    Interview.scheduled_at.is_not(None),
+                    Interview.scheduled_at > scheduled_at - window,
+                    Interview.scheduled_at < scheduled_at + window,
+                )
+            ).first()
+            interviewer_clash = clash is not None
+            step["interviewer_clash_found"] = interviewer_clash
+            log.debug("scheduling.validate_no_duplicate_round.interviewer_availability",
+                      interviewer_id=interviewer_id, window_minutes=_INTERVIEW_MINUTES,
+                      clash_found=interviewer_clash)
+            if interviewer_clash:
+                log.warning("scheduling.validate_no_duplicate_round.interviewer_double_booked",
+                            interviewer_id=interviewer_id)
+                raise BadRequestError("The interviewer already has an interview at that time")
+        else:
+            log.debug("scheduling.validate_no_duplicate_round.interviewer_check_skipped",
+                      has_interviewer=bool(interviewer_id), has_scheduled_at=bool(scheduled_at))
+        return {}
 
 
 def create_interview(state: ScheduleState, config) -> dict:
-    db = _db(config)
-    rtype = RoundType(state["round_type"])
-    scheduled_at = _parse_dt(state.get("scheduled_at"))
-    interview = Interview(
-        candidate_id=uuid.UUID(state["candidate_id"]),
-        requisition_id=uuid.UUID(state["requisition_id"]) if state.get("requisition_id") else None,
-        interviewer_id=uuid.UUID(state["interviewer_id"]) if state.get("interviewer_id") else None,
-        round_number=_ROUND_NUMBER.get(rtype, 1),
-        round_type=rtype,
-        status=InterviewStatus.SCHEDULED,
-        scheduled_at=scheduled_at,
-        meeting_link=state.get("meeting_link"),
-        created_by=uuid.UUID(state["created_by"]) if state.get("created_by") else None,
-    )
-    db.add(interview)
-    db.flush()
-    return {"interview_id": str(interview.id)}
+    with log_step(log, "scheduling.create_interview",
+                  candidate_id=state.get("candidate_id"),
+                  requisition_id=state.get("requisition_id"),
+                  round_type=state.get("round_type")) as step:
+        db = _db(config)
+        rtype = RoundType(state["round_type"])
+        scheduled_at = _parse_dt(state.get("scheduled_at"))
+        interview = Interview(
+            candidate_id=uuid.UUID(state["candidate_id"]),
+            requisition_id=uuid.UUID(state["requisition_id"]) if state.get("requisition_id") else None,
+            interviewer_id=uuid.UUID(state["interviewer_id"]) if state.get("interviewer_id") else None,
+            round_number=_ROUND_NUMBER.get(rtype, 1),
+            round_type=rtype,
+            status=InterviewStatus.SCHEDULED,
+            scheduled_at=scheduled_at,
+            meeting_link=state.get("meeting_link"),
+            created_by=uuid.UUID(state["created_by"]) if state.get("created_by") else None,
+        )
+        db.add(interview)
+        db.flush()
+        step["interview_id"] = str(interview.id)
+        step["round_number"] = _ROUND_NUMBER.get(rtype, 1)
+        log.debug("scheduling.create_interview.flushed", interview_id=str(interview.id),
+                  scheduled_at=scheduled_at.isoformat() if scheduled_at else None)
+        return {"interview_id": str(interview.id)}
 
 
 def send_calendar_invite(state: ScheduleState, config) -> dict:
-    db = _db(config)
-    interview = db.get(Interview, uuid.UUID(state["interview_id"]))
-    cand = db.get(Candidate, interview.candidate_id)
-    interviewer = db.get(User, interview.interviewer_id) if interview.interviewer_id else None
-    req = db.get(Requisition, interview.requisition_id) if interview.requisition_id else None
+    with log_step(log, "scheduling.send_calendar_invite",
+                  interview_id=state.get("interview_id")) as step:
+        db = _db(config)
+        interview = db.get(Interview, uuid.UUID(state["interview_id"]))
+        cand = db.get(Candidate, interview.candidate_id)
+        interviewer = db.get(User, interview.interviewer_id) if interview.interviewer_id else None
+        req = db.get(Requisition, interview.requisition_id) if interview.requisition_id else None
+        log.debug("scheduling.send_calendar_invite.context",
+                  interview_id=str(interview.id),
+                  has_candidate=cand is not None, has_interviewer=interviewer is not None,
+                  has_requisition=req is not None)
 
-    start = interview.scheduled_at or dt.datetime.now(dt.timezone.utc)
-    end = start + dt.timedelta(hours=1)
-    organizer = interviewer.email if interviewer else "scheduler@local.dev"
-    attendees = [e for e in [organizer, cand.email if cand and "@placeholder.local" not in cand.email else None] if e]
-    subject = f"{interview.round_type.value} Interview — {cand.full_name if cand else 'Candidate'}"
-    if req:
-        subject += f" ({req.title})"
+        start = interview.scheduled_at or dt.datetime.now(dt.timezone.utc)
+        end = start + dt.timedelta(hours=1)
+        organizer = interviewer.email if interviewer else "scheduler@local.dev"
+        attendees = [e for e in [organizer, cand.email if cand and "@placeholder.local" not in cand.email else None] if e]
+        subject = f"{interview.round_type.value} Interview — {cand.full_name if cand else 'Candidate'}"
+        if req:
+            subject += f" ({req.title})"
 
-    meeting = graph.create_meeting(
-        organizer_email=organizer, subject=subject,
-        start_iso=start.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-        end_iso=end.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-        attendee_emails=attendees,
-    )
-    if not interview.meeting_link:
-        interview.meeting_link = meeting.get("join_url")
-    interview.calendar_event_id = meeting.get("event_id")
-    db.flush()
-    return {"calendar_event_id": meeting.get("event_id")}
+        with log_step(log, "scheduling.send_calendar_invite.ms_graph_create_meeting",
+                      organizer=organizer, attendee_count=len(attendees),
+                      mock=graph.is_mock()) as call_step:
+            meeting = graph.create_meeting(
+                organizer_email=organizer, subject=subject,
+                start_iso=start.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+                end_iso=end.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+                attendee_emails=attendees,
+            )
+            call_step["event_id"] = meeting.get("event_id")
+            call_step["mock"] = meeting.get("mock")
+        if not interview.meeting_link:
+            interview.meeting_link = meeting.get("join_url")
+        interview.calendar_event_id = meeting.get("event_id")
+        db.flush()
+        step["calendar_event_id"] = meeting.get("event_id")
+        return {"calendar_event_id": meeting.get("event_id")}
 
 
 def emit_analytics(state: ScheduleState, config) -> dict:
-    db = _db(config)
-    interview = db.get(Interview, uuid.UUID(state["interview_id"]))
-    log_event(db, EventType.INTERVIEW_SCHEDULED, candidate_id=interview.candidate_id,
-              requisition_id=interview.requisition_id, triggered_by=interview.created_by,
-              metadata={"round_type": interview.round_type.value})
-    # Advance the application into the interview stage.
-    if interview.requisition_id:
-        app = db.execute(select(JobApplication).filter_by(
-            candidate_id=interview.candidate_id, requisition_id=interview.requisition_id)).scalar_one_or_none()
-        if app and app.status != ApplicationStatus.INTERVIEW_SCHEDULED:
-            prev = app.status
-            app.status = ApplicationStatus.INTERVIEW_SCHEDULED
-            db.add(ApplicationStatusHistory(application_id=app.id, from_status=prev,
-                                            to_status=ApplicationStatus.INTERVIEW_SCHEDULED,
-                                            reason_note=f"{interview.round_type.value} scheduled"))
-    return {}
+    with log_step(log, "scheduling.emit_analytics",
+                  interview_id=state.get("interview_id")) as step:
+        db = _db(config)
+        interview = db.get(Interview, uuid.UUID(state["interview_id"]))
+        log_event(db, EventType.INTERVIEW_SCHEDULED, candidate_id=interview.candidate_id,
+                  requisition_id=interview.requisition_id, triggered_by=interview.created_by,
+                  metadata={"round_type": interview.round_type.value})
+        log.debug("scheduling.emit_analytics.event_emitted",
+                  event_type=EventType.INTERVIEW_SCHEDULED.value,
+                  candidate_id=str(interview.candidate_id),
+                  round_type=interview.round_type.value)
+        # Advance the application into the interview stage.
+        if interview.requisition_id:
+            app = db.execute(select(JobApplication).filter_by(
+                candidate_id=interview.candidate_id, requisition_id=interview.requisition_id)).scalar_one_or_none()
+            if app and app.status != ApplicationStatus.INTERVIEW_SCHEDULED:
+                prev = app.status
+                app.status = ApplicationStatus.INTERVIEW_SCHEDULED
+                db.add(ApplicationStatusHistory(application_id=app.id, from_status=prev,
+                                                to_status=ApplicationStatus.INTERVIEW_SCHEDULED,
+                                                reason_note=f"{interview.round_type.value} scheduled"))
+                step["application_status_advanced"] = True
+                log.info("scheduling.emit_analytics.application_advanced",
+                         application_id=str(app.id),
+                         from_status=prev.value if prev else None,
+                         to_status=ApplicationStatus.INTERVIEW_SCHEDULED.value)
+            else:
+                step["application_status_advanced"] = False
+                log.debug("scheduling.emit_analytics.application_advance_skipped",
+                          has_application=app is not None,
+                          already_scheduled=bool(app and app.status == ApplicationStatus.INTERVIEW_SCHEDULED))
+        return {}
 
 
 def _parse_dt(value) -> dt.datetime | None:
@@ -134,6 +213,7 @@ def _parse_dt(value) -> dt.datetime | None:
         parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
     except ValueError:
+        log.debug("scheduling.parse_dt.failed", value=str(value))
         return None
 
 
@@ -168,7 +248,15 @@ def schedule_interview(*, candidate_id, requisition_id, interviewer_id, round_ty
         "created_by": str(created_by) if created_by else None,
     }
     try:
-        final = _GRAPH.invoke(state, config={"configurable": {"db": session}})
+        with log_step(log, "scheduling.schedule_interview",
+                      candidate_id=str(candidate_id),
+                      requisition_id=str(requisition_id) if requisition_id else None,
+                      interviewer_id=str(interviewer_id) if interviewer_id else None,
+                      round_type=state["round_type"],
+                      owns_session=own) as step:
+            final = _GRAPH.invoke(state, config={"configurable": {"db": session}})
+            step["interview_id"] = final.get("interview_id")
+            step["calendar_event_id"] = final.get("calendar_event_id")
         if own:
             session.commit()
         return {"interview_id": final.get("interview_id"),

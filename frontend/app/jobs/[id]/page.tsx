@@ -16,6 +16,7 @@ import { LoadingState, ErrorState, EmptyState } from "@/components/ui/Spinner";
 import { Modal } from "@/components/ui/Modal";
 import { useToast } from "@/components/ui/Toast";
 import { ScheduleInterviewModal } from "@/components/interviews/ScheduleInterviewModal";
+import { AssignInterviewersPanel } from "@/components/jobs/AssignInterviewersPanel";
 import { useAuth } from "@/lib/auth";
 import { apiGet, apiList, apiPatch, apiPost } from "@/lib/api";
 import { useFetch, useDebounce } from "@/lib/hooks";
@@ -163,8 +164,9 @@ function JobContent({ id }: { id: string }) {
       </Card>
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
-        {/* Description + skills */}
-        <Card className="lg:col-span-1">
+        {/* Description + skills + interview panel */}
+        <div className="space-y-5 lg:col-span-1">
+        <Card>
           <CardHeader title="Details" />
           <CardBody className="space-y-4">
             {req.description && (
@@ -200,6 +202,8 @@ function JobContent({ id }: { id: string }) {
             </div>
           </CardBody>
         </Card>
+        {canEdit && <AssignInterviewersPanel requisitionId={req.id} />}
+        </div>
 
         {/* Ranked candidates */}
         <Card className="lg:col-span-2">

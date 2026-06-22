@@ -11,6 +11,8 @@ Dev logins created:
 """
 from __future__ import annotations
 
+import datetime as dt
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,13 +21,16 @@ from app.database.base import SessionLocal
 from app.models import (
     Department,
     Domain,
+    InterviewerSlot,
     PipelineStatusReason,
     Requisition,
+    RequisitionInterviewer,
     RequisitionSkill,
     Skill,
     SkillAlias,
     User,
 )
+from app.models.scheduling import WEEKDAYS_MON_FRI
 from app.models.enums import (
     RequisitionStatus,
     SeniorityLevel,
@@ -175,6 +180,27 @@ def seed() -> None:
             skill_by_name=skill_by_name,
             description="Own backend services and data layer. Python + Postgres at scale.",
         )
+        db.commit()
+
+        # Interviewer panels + recurring slots (local time, company_timezone).
+        # e.g. Associate AI Engineer has two interviewers with 4:30 PM and 8:30 PM slots.
+        alice = db.execute(select(User).filter_by(email="alice@local.dev")).scalar_one()
+        bob = db.execute(select(User).filter_by(email="bob@local.dev")).scalar_one()
+        req_aiml = db.execute(select(Requisition).filter_by(title="Associate AI Engineer")).scalar_one()
+        req_backend = db.execute(select(Requisition).filter_by(title="Senior Backend Engineer")).scalar_one()
+
+        for req, interviewers in [(req_aiml, [alice, bob]), (req_backend, [bob])]:
+            for interviewer in interviewers:
+                _get_or_create(db, RequisitionInterviewer,
+                               requisition_id=req.id, interviewer_id=interviewer.id)
+
+        for interviewer, times in [(alice, [dt.time(16, 30), dt.time(20, 30)]), (bob, [dt.time(10, 0)])]:
+            for t in times:
+                _get_or_create(
+                    db, InterviewerSlot,
+                    defaults={"weekday_mask": WEEKDAYS_MON_FRI, "duration_minutes": 60, "is_active": True},
+                    interviewer_id=interviewer.id, slot_time=t,
+                )
         db.commit()
         print("Seed complete.")
     finally:

@@ -23,8 +23,11 @@ _tunnel = None
 
 def _backend_port(default: int = 8000) -> int:
     try:
-        return urlparse(settings.backend_base_url).port or default
+        port = urlparse(settings.backend_base_url).port or default
+        log.debug("tunnel.backend_port", port=port)
+        return port
     except Exception:
+        log.debug("tunnel.backend_port", port=default, fallback=True)
         return default
 
 
@@ -32,7 +35,9 @@ def start_tunnel() -> str | None:
     """Open an ngrok tunnel to the backend port and point `backend_base_url`
     at the public URL. No-op (returns None) when disabled or unavailable."""
     global _tunnel
+    log.info("tunnel.start.begin")
     if not settings.ngrok_enabled:
+        log.info("tunnel.start.noop", reason="ngrok_disabled")
         return None
     try:
         from pyngrok import conf, ngrok
@@ -53,22 +58,27 @@ def start_tunnel() -> str | None:
             settings.oauth_redirect_base_url = settings.backend_base_url
         settings.backend_base_url = public_url.rstrip("/")
         log.info("ngrok_tunnel_started", public_url=settings.backend_base_url, port=port)
+        log.info("tunnel.start.end", public_url=settings.backend_base_url, port=port)
         return settings.backend_base_url
     except Exception as exc:
-        log.warning("ngrok_tunnel_failed", error=str(exc))
+        log.warning("ngrok_tunnel_failed", error=str(exc), exc_info=True)
         return None
 
 
 def stop_tunnel() -> None:
     global _tunnel
+    log.info("tunnel.stop.begin")
     if _tunnel is None:
+        log.info("tunnel.stop.noop", reason="no_tunnel")
         return
+    public_url = getattr(_tunnel, "public_url", None)
     try:
         from pyngrok import ngrok
 
         ngrok.disconnect(_tunnel.public_url)
         ngrok.kill()
+        log.info("tunnel.stop.end", public_url=public_url)
     except Exception as exc:
-        log.warning("ngrok_tunnel_stop_failed", error=str(exc))
+        log.warning("ngrok_tunnel_stop_failed", error=str(exc), exc_info=True)
     finally:
         _tunnel = None

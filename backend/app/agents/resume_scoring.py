@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 
 from app.config import settings
 from app.core.events import log_event
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_step
 from app.database.base import SessionLocal
 from app.models import (
     Candidate,
@@ -50,39 +50,72 @@ def _db(config) -> Any:
 
 
 def resolve_pairs(state: ScoreState, config) -> dict:
-    db = _db(config)
-    pairs: list[tuple[str, str]] = []
-    if state.get("mode") == "candidate":
-        cand = db.get(Candidate, uuid.UUID(state["candidate_id"]))
-        if cand is None:
-            return {"pairs": []}
-        stmt = select(Requisition.id).where(Requisition.status == RequisitionStatus.OPEN)
-        if cand.domain_id is not None:
-            stmt = stmt.where(Requisition.domain_id == cand.domain_id)
-        for (rid,) in db.execute(stmt).all():
-            pairs.append((str(cand.id), str(rid)))
-    else:  # requisition mode
-        req = db.get(Requisition, uuid.UUID(state["requisition_id"]))
-        if req is None:
-            return {"pairs": []}
-        stmt = select(Candidate.id).where(Candidate.is_blacklisted.is_(False))
-        if req.domain_id is not None:
-            stmt = stmt.where((Candidate.domain_id == req.domain_id) | (Candidate.domain_id.is_(None)))
-        for (cid,) in db.execute(stmt).all():
-            pairs.append((str(cid), str(req.id)))
-    return {"pairs": pairs}
+    with log_step(
+        log,
+        "agent.scoring.resolve_pairs",
+        mode=state.get("mode"),
+        candidate_id=state.get("candidate_id"),
+        requisition_id=state.get("requisition_id"),
+    ) as step:
+        db = _db(config)
+        pairs: list[tuple[str, str]] = []
+        if state.get("mode") == "candidate":
+            cand = db.get(Candidate, uuid.UUID(state["candidate_id"]))
+            if cand is None:
+                log.debug("agent.scoring.candidate_not_found", candidate_id=state.get("candidate_id"))
+                step["pair_count"] = 0
+                return {"pairs": []}
+            stmt = select(Requisition.id).where(Requisition.status == RequisitionStatus.OPEN)
+            if cand.domain_id is not None:
+                stmt = stmt.where(Requisition.domain_id == cand.domain_id)
+            for (rid,) in db.execute(stmt).all():
+                pairs.append((str(cand.id), str(rid)))
+        else:  # requisition mode
+            req = db.get(Requisition, uuid.UUID(state["requisition_id"]))
+            if req is None:
+                log.debug("agent.scoring.requisition_not_found", requisition_id=state.get("requisition_id"))
+                step["pair_count"] = 0
+                return {"pairs": []}
+            stmt = select(Candidate.id).where(Candidate.is_blacklisted.is_(False))
+            if req.domain_id is not None:
+                stmt = stmt.where((Candidate.domain_id == req.domain_id) | (Candidate.domain_id.is_(None)))
+            for (cid,) in db.execute(stmt).all():
+                pairs.append((str(cid), str(req.id)))
+        step["pair_count"] = len(pairs)
+        return {"pairs": pairs}
 
 
 def compute(state: ScoreState, config) -> dict:
-    db = _db(config)
-    computed: list[dict] = []
-    for cid, rid in state.get("pairs", []):
-        cand = db.get(Candidate, uuid.UUID(cid))
-        req = db.get(Requisition, uuid.UUID(rid))
-        if cand is None or req is None:
-            continue
-        computed.append(score_pair(db, cand, req))
-    return {"computed": computed}
+    pairs = state.get("pairs", [])
+    threshold = settings.resume_threshold_ratio
+    with log_step(log, "agent.scoring.compute", pair_count=len(pairs)) as step:
+        db = _db(config)
+        computed: list[dict] = []
+        for cid, rid in pairs:
+            cand = db.get(Candidate, uuid.UUID(cid))
+            req = db.get(Requisition, uuid.UUID(rid))
+            if cand is None or req is None:
+                continue
+            s = score_pair(db, cand, req)
+            log.debug(
+                "agent.scoring.pair_scored",
+                candidate_id=s["candidate_id"],
+                requisition_id=s["requisition_id"],
+                total_score=s["total_score"],
+                skills_score=s["skills_score"],
+                experience_score=s["experience_score"],
+                skills_depth_score=s["skills_depth_score"],
+                location_score=s["location_score"],
+                notice_period_score=s["notice_period_score"],
+                passed_ats=s["total_score"] >= threshold,
+                threshold=threshold,
+            )
+            computed.append(s)
+        passed = sum(1 for s in computed if s["total_score"] >= threshold)
+        step["scored_count"] = len(computed)
+        step["passed_count"] = passed
+        step["threshold"] = threshold
+        return {"computed": computed}
 
 
 def score_pair(db, cand: Candidate, req: Requisition) -> dict:
@@ -174,52 +207,69 @@ def _notice(days) -> float:
 
 
 def persist(state: ScoreState, config) -> dict:
-    db = _db(config)
+    computed = state.get("computed", [])
     threshold = settings.resume_threshold_ratio
-    for s in state.get("computed", []):
-        cid, rid = uuid.UUID(s["candidate_id"]), uuid.UUID(s["requisition_id"])
-        existing = db.execute(
-            select(CandidateScore).filter_by(candidate_id=cid, requisition_id=rid)
-        ).scalar_one_or_none()
-        if existing:
-            existing.total_score = s["total_score"]
-            existing.skills_score = s["skills_score"]
-            existing.experience_score = s["experience_score"]
-            existing.skills_depth_score = s["skills_depth_score"]
-            existing.location_score = s["location_score"]
-            existing.notice_period_score = s["notice_period_score"]
-            existing.scoring_version = SCORING_VERSION
-        else:
-            db.add(CandidateScore(candidate_id=cid, requisition_id=rid, scoring_version=SCORING_VERSION,
-                                  total_score=s["total_score"], skills_score=s["skills_score"],
-                                  experience_score=s["experience_score"], skills_depth_score=s["skills_depth_score"],
-                                  location_score=s["location_score"], notice_period_score=s["notice_period_score"]))
+    with log_step(log, "agent.scoring.persist", computed_count=len(computed), threshold=threshold) as step:
+        db = _db(config)
+        updated = inserted = auto_linked = 0
+        for s in computed:
+            cid, rid = uuid.UUID(s["candidate_id"]), uuid.UUID(s["requisition_id"])
+            existing = db.execute(
+                select(CandidateScore).filter_by(candidate_id=cid, requisition_id=rid)
+            ).scalar_one_or_none()
+            if existing:
+                existing.total_score = s["total_score"]
+                existing.skills_score = s["skills_score"]
+                existing.experience_score = s["experience_score"]
+                existing.skills_depth_score = s["skills_depth_score"]
+                existing.location_score = s["location_score"]
+                existing.notice_period_score = s["notice_period_score"]
+                existing.scoring_version = SCORING_VERSION
+                updated += 1
+            else:
+                db.add(CandidateScore(candidate_id=cid, requisition_id=rid, scoring_version=SCORING_VERSION,
+                                      total_score=s["total_score"], skills_score=s["skills_score"],
+                                      experience_score=s["experience_score"], skills_depth_score=s["skills_depth_score"],
+                                      location_score=s["location_score"], notice_period_score=s["notice_period_score"]))
+                inserted += 1
 
-        app = db.execute(
-            select(JobApplication).filter_by(candidate_id=cid, requisition_id=rid)
-        ).scalar_one_or_none()
-        if app:
-            app.match_score = s["total_score"]
-        elif s["total_score"] >= threshold:
-            # Auto-link above-threshold candidates into the requisition pipeline.
-            app = JobApplication(candidate_id=cid, requisition_id=rid, status=ApplicationStatus.NEW,
-                                 match_score=s["total_score"])
-            db.add(app)
-            db.flush()
-            db.add(ApplicationStatusHistory(application_id=app.id, from_status=None,
-                                            to_status=ApplicationStatus.NEW, reason_note="Auto-linked by scoring"))
-    db.flush()
-    return {}
+            app = db.execute(
+                select(JobApplication).filter_by(candidate_id=cid, requisition_id=rid)
+            ).scalar_one_or_none()
+            if app:
+                app.match_score = s["total_score"]
+            elif s["total_score"] >= threshold:
+                # Auto-link above-threshold candidates into the requisition pipeline.
+                app = JobApplication(candidate_id=cid, requisition_id=rid, status=ApplicationStatus.NEW,
+                                     match_score=s["total_score"])
+                db.add(app)
+                db.flush()
+                db.add(ApplicationStatusHistory(application_id=app.id, from_status=None,
+                                                to_status=ApplicationStatus.NEW, reason_note="Auto-linked by scoring"))
+                auto_linked += 1
+                log.info(
+                    "agent.scoring.auto_linked",
+                    candidate_id=s["candidate_id"],
+                    requisition_id=s["requisition_id"],
+                    total_score=s["total_score"],
+                )
+        db.flush()
+        step["scores_updated"] = updated
+        step["scores_inserted"] = inserted
+        step["auto_linked"] = auto_linked
+        return {}
 
 
 def emit_analytics(state: ScoreState, config) -> dict:
-    db = _db(config)
-    for s in state.get("computed", []):
-        log_event(db, EventType.SCORE_COMPUTED,
-                  candidate_id=uuid.UUID(s["candidate_id"]),
-                  requisition_id=uuid.UUID(s["requisition_id"]),
-                  metadata={"total_score": s["total_score"]})
-    return {}
+    computed = state.get("computed", [])
+    with log_step(log, "agent.scoring.emit_analytics", event_count=len(computed)):
+        db = _db(config)
+        for s in computed:
+            log_event(db, EventType.SCORE_COMPUTED,
+                      candidate_id=uuid.UUID(s["candidate_id"]),
+                      requisition_id=uuid.UUID(s["requisition_id"]),
+                      metadata={"total_score": s["total_score"]})
+        return {}
 
 
 def build_scoring_graph():
@@ -243,10 +293,19 @@ def _run(state: ScoreState, db=None) -> int:
     own = db is None
     session = db or SessionLocal()
     try:
-        final = _GRAPH.invoke(state, config={"configurable": {"db": session}})
+        with log_step(
+            log,
+            "agent.scoring.run",
+            mode=state.get("mode"),
+            candidate_id=state.get("candidate_id"),
+            requisition_id=state.get("requisition_id"),
+        ) as step:
+            final = _GRAPH.invoke(state, config={"configurable": {"db": session}})
+            count = len(final.get("computed", []))
+            step["scored_count"] = count
         if own:
             session.commit()
-        return len(final.get("computed", []))
+        return count
     except Exception:
         if own:
             session.rollback()

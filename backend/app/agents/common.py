@@ -7,8 +7,11 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.logging import get_logger
 from app.models import Skill, SkillAlias
 from app.models.enums import ProficiencyLevel, SkillCategory
+
+log = get_logger("agent.common")
 
 
 @lru_cache
@@ -55,6 +58,7 @@ def normalize_skill(db: Session, raw_name: str) -> tuple[Skill | None, bool]:
     db.add(skill)
     db.flush()
     _ensure_alias(db, skill.id, alias)
+    log.debug("agent.common.skill_created", skill_id=str(skill.id), name=skill.name)
     return skill, True
 
 

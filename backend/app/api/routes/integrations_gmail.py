@@ -34,10 +34,12 @@ def gmail_status(admin: User = Depends(require_roles(UserRole.ADMIN))):
 def gmail_connect(admin: User = Depends(require_roles(UserRole.ADMIN))):
     """Return the Google consent URL; the frontend redirects the browser to it."""
     if not oauth.oauth_client_configured():
+        log.warning("gmail_connect_not_configured", admin_id=str(admin.id))
         raise BadRequestError(
             "Gmail OAuth client is not configured",
             detail="Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.",
         )
+    log.info("gmail_connect_initiated", admin_id=str(admin.id))
     return single({"authorization_url": oauth.authorization_url(str(admin.id))})
 
 
@@ -47,6 +49,8 @@ def gmail_callback(code: str | None = None, state: str | None = None, error: str
     stores tokens encrypted, then redirects back to the frontend admin page."""
     frontend = settings.frontend_base_url.rstrip("/")
     if error or not code or not state:
+        log.warning("gmail_callback_missing_params", error=error,
+                    has_code=bool(code), has_state=bool(state))
         return RedirectResponse(f"{frontend}/admin?gmail=error", status_code=302)
     try:
         tokens = oauth.exchange_code(code, state)
@@ -74,4 +78,5 @@ def gmail_callback(code: str | None = None, state: str | None = None, error: str
 def gmail_disconnect(admin: User = Depends(require_roles(UserRole.ADMIN))):
     """Clear stored OAuth tokens. Does not affect service-account / env modes."""
     gmail.disconnect()
+    log.info("gmail_disconnected", admin_id=str(admin.id))
     return single(gmail.get_status())

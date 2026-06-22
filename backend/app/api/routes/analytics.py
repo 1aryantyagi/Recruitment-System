@@ -7,12 +7,14 @@ from sqlalchemy.orm import Session
 from app.agents import analytics as a7
 from app.core.auth import require_roles
 from app.core.errors import NotFoundError
+from app.core.logging import get_logger
 from app.core.responses import single
 from app.database.base import get_db
 from app.models import User
 from app.models.enums import UserRole
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
+log = get_logger("route.analytics")
 _HR_DM_ADMIN = require_roles(UserRole.HR, UserRole.DELIVERY_MANAGER, UserRole.ADMIN)
 
 
@@ -24,6 +26,7 @@ def dashboard(
 ):
     data = a7.dashboard(db)
     if summary:
+        log.debug("route.analytics.dashboard.digest_requested")
         data["digest"] = a7.digest(db)
     return single(data)
 
@@ -47,5 +50,6 @@ def time_to_hire(db: Session = Depends(get_db), user: User = Depends(_HR_DM_ADMI
 def requisition_analytics(requisition_id: str, db: Session = Depends(get_db), user: User = Depends(_HR_DM_ADMIN)):
     data = a7.requisition_analytics(db, requisition_id)
     if not data:
+        log.warning("route.analytics.requisition.not_found", requisition_id=requisition_id)
         raise NotFoundError("Requisition not found")
     return single(data)

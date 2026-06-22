@@ -13,6 +13,7 @@ from app.api.serializers import feedback_dict, interview_dict
 from app.core.auth import ensure_can_modify, require_roles
 from app.core.errors import BadRequestError, NotFoundError
 from app.core.events import log_audit
+from app.core.logging import get_logger
 from app.core.responses import Pagination, list_envelope, pagination_params, single
 from app.database.base import get_db
 from app.models import Interview, User
@@ -21,6 +22,7 @@ from app.schemas.api import FeedbackRequest, ScheduleInterviewRequest, UpdateInt
 from app.services import flow
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
+log = get_logger("route.interviews")
 _HR_DM_ADMIN = require_roles(UserRole.HR, UserRole.DELIVERY_MANAGER, UserRole.ADMIN)
 
 
@@ -38,6 +40,9 @@ def create_interview(
     log_audit(db, user_id=user.id, action="SCHEDULED_INTERVIEW", entity_type="interview",
               entity_id=result.get("interview_id"))
     db.commit()
+    log.info("route.interviews.scheduled", interview_id=result.get("interview_id"),
+             candidate_id=body.candidate_id, requisition_id=body.requisition_id,
+             interviewer_id=body.interviewer_id, round_type=body.round_type, created_by=str(user.id))
     interview = db.get(Interview, uuid.UUID(result["interview_id"]))
     return single(interview_dict(interview, with_feedback=True, db=db))
 
@@ -68,6 +73,7 @@ def update_interview(
 ):
     interview = db.get(Interview, _uuid(interview_id))
     if interview is None:
+        log.warning("route.interviews.update.not_found", interview_id=interview_id)
         raise NotFoundError("Interview not found")
     ensure_can_modify(user, interview.created_by)
     try:
@@ -77,6 +83,8 @@ def update_interview(
     log_audit(db, user_id=user.id, action="UPDATED_INTERVIEW", entity_type="interview", entity_id=interview.id)
     db.commit()
     db.refresh(interview)
+    log.info("route.interviews.status_changed", interview_id=str(interview.id),
+             new_status=interview.status.value, updated_by=str(user.id))
     return single(interview_dict(interview, with_feedback=True, db=db))
 
 
@@ -92,6 +100,7 @@ def upload_recording(
     analysis) on the Flow layer; returns 202 immediately (§4.6, §7.5)."""
     interview = db.get(Interview, _uuid(interview_id))
     if interview is None:
+        log.warning("route.interviews.recording.not_found", interview_id=interview_id)
         raise NotFoundError("Interview not found")
     ensure_can_modify(user, interview.created_by)
     content = file.file.read()
@@ -99,6 +108,8 @@ def upload_recording(
     db.commit()
     background.add_task(flow.run_interview_analysis, str(interview.id), content,
                         file.filename or "interview.mp3", None)
+    log.info("route.interviews.recording.dispatch_background", interview_id=str(interview.id),
+             uploaded_by=str(user.id))
     return single({"interview_id": str(interview.id), "status": "ACCEPTED",
                    "message": "Recording received; analysis is processing."})
 
@@ -112,6 +123,7 @@ def submit_interview_feedback(
 ):
     interview = db.get(Interview, _uuid(interview_id))
     if interview is None:
+        log.warning("route.interviews.feedback.not_found", interview_id=interview_id)
         raise NotFoundError("Interview not found")
     # The interview's creator or its assigned interviewer may submit feedback.
     ensure_can_modify(user, interview.created_by, interview.interviewer_id)
@@ -120,6 +132,7 @@ def submit_interview_feedback(
     log_audit(db, user_id=user.id, action="UPDATED_FEEDBACK", entity_type="interview", entity_id=interview_id)
     db.commit()
     db.refresh(fb)
+    log.info("route.interviews.feedback_submitted", interview_id=interview_id, submitted_by=str(user.id))
     return single(feedback_dict(fb))
 
 
@@ -131,6 +144,7 @@ def get_interview_feedback(
 ):
     interview = db.get(Interview, _uuid(interview_id))
     if interview is None:
+        log.warning("route.interviews.get_feedback.not_found", interview_id=interview_id)
         raise NotFoundError("Interview not found")
     return single({
         "interview": interview_dict(interview, with_feedback=False, db=db),

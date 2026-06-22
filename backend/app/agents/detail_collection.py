@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.core.events import log_event
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_step
 from app.database.base import SessionLocal
 from app.integrations.gmail import client as gmail
 from app.llm import client as llm
@@ -95,12 +95,22 @@ def _compose_body(candidate: Candidate, missing: list[str], requisition_title: s
                 "Ask them to reply to this email with these details:\n"
                 + "\n".join(f"- {label}" for label in labels)
             )
-            body = llm.complete_text("short", _COMPOSE_SYSTEM, human, max_tokens=400).strip()
+            with log_step(
+                log,
+                "agent.detail_collection.compose_email.call",
+                tier="short",
+                field_count=len(missing),
+            ) as call:
+                body = llm.complete_text("short", _COMPOSE_SYSTEM, human, max_tokens=400).strip()
+                call["body_chars"] = len(body)
             if body:
                 return body
         except Exception as exc:
-            log.warning("detail_compose_llm_failed", error=str(exc))
+            log.warning("detail_compose_llm_failed", error=str(exc), exc_info=True)
+    else:
+        log.info("agent.detail_collection.compose_llm_unavailable", field_count=len(missing))
     # Deterministic fallback.
+    log.debug("agent.detail_collection.compose_fallback", field_count=len(missing))
     bullets = "\n".join(f"  - {label}" for label in labels)
     return (
         f"Hi {_first_name(candidate.full_name)},\n\n"
@@ -137,37 +147,56 @@ def request_details(
     own = db is None
     session = db or SessionLocal()
     try:
+      with log_step(log, "agent.detail_collection.request_details", candidate_id=str(candidate_id)) as step:
         cid = uuid.UUID(str(candidate_id))
         candidate = session.get(Candidate, cid)
         if candidate is None:
+            log.info("detail_request_skipped", reason="candidate_not_found", candidate_id=str(cid))
+            step["skipped"] = "candidate_not_found"
             return None
 
         missing = missing_detail_fields(candidate)
+        log.debug("agent.detail_collection.missing_fields", candidate_id=str(cid), missing=missing)
         if not missing:
+            log.info("detail_request_skipped", reason="nothing_missing", candidate_id=str(cid))
+            step["skipped"] = "nothing_missing"
             return None
 
         addr = (to_email or "").strip()
         if not addr or "@" not in addr or addr.lower().endswith("@placeholder.local"):
             log.info("detail_request_skipped", reason="no_valid_email", candidate_id=str(cid))
+            step["skipped"] = "no_valid_email"
             return None
 
         # Idempotency: don't re-email while a request is outstanding or answered.
         existing = _latest_request(session, cid)
         if existing is not None and existing.status != DetailRequestStatus.FAILED:
+            log.info("detail_request_skipped", reason="request_outstanding",
+                     candidate_id=str(cid), status=str(existing.status))
+            step["skipped"] = "request_outstanding"
             return None
 
         body = _compose_body(candidate, missing, requisition_title)
         reply_subject = f"Re: {subject}" if subject else (
             f"A few details to complete your application — {settings.company_name}"
         )
-        sent_id = gmail.send_reply(
+        with log_step(
+            log,
+            "agent.detail_collection.gmail_send",
+            candidate_id=str(cid),
             to=addr,
-            subject=reply_subject,
-            body=body,
-            thread_id=thread_id,
-            in_reply_to=original_message_id,
-            db=session,
-        )
+            field_count=len(missing),
+        ) as send:
+            sent_id = gmail.send_reply(
+                to=addr,
+                subject=reply_subject,
+                body=body,
+                thread_id=thread_id,
+                in_reply_to=original_message_id,
+                db=session,
+            )
+            send["sent_message_id"] = sent_id
+            send["sent"] = bool(sent_id)
 
         # Reuse a prior FAILED row on retry; otherwise create a fresh one.
         row = existing if (existing is not None and existing.status == DetailRequestStatus.FAILED) else None
@@ -188,6 +217,8 @@ def request_details(
             session.commit()
         if not sent_id:
             log.warning("detail_request_send_failed", candidate_id=str(cid))
+        step["sent"] = bool(sent_id)
+        step["requested_fields"] = missing
         return row
     except Exception:
         if own:
@@ -248,28 +279,48 @@ def ingest_detail_reply(*, request: CandidateDetailRequest, reply_text: str, db)
     """Parse a candidate's reply, write the values onto their record, and close the
     request (status -> RECEIVED). Returns the list of fields applied. The caller
     owns the transaction (commits) — mirrors the scheduler's per-poll session."""
-    candidate = db.get(Candidate, request.candidate_id)
-    text = (reply_text or "").strip()
-    applied: list[str] = []
-    parsed: dict | None = None
+    with log_step(
+        log,
+        "agent.detail_collection.ingest_reply",
+        candidate_id=str(request.candidate_id),
+        reply_chars=len((reply_text or "").strip()),
+    ) as step:
+        candidate = db.get(Candidate, request.candidate_id)
+        text = (reply_text or "").strip()
+        applied: list[str] = []
+        parsed: dict | None = None
 
-    if candidate is not None and text and llm.llm_available():
-        try:
-            result = llm.complete_structured(
-                "extraction", _PARSE_SYSTEM, text, CandidateDetailsExtraction
+        if candidate is not None and text and llm.llm_available():
+            try:
+                with log_step(
+                    log,
+                    "agent.detail_collection.parse_reply.call",
+                    tier="extraction",
+                    text_chars=len(text),
+                ):
+                    result = llm.complete_structured(
+                        "extraction", _PARSE_SYSTEM, text, CandidateDetailsExtraction
+                    )
+                parsed = result.model_dump()
+                applied = _apply_extraction(candidate, parsed)
+            except Exception as exc:
+                log.warning("detail_reply_parse_failed", error=str(exc), exc_info=True,
+                            candidate_id=str(request.candidate_id))
+        else:
+            log.info(
+                "agent.detail_collection.parse_reply_skipped",
+                candidate_id=str(request.candidate_id),
+                reason="no_text" if not text else "llm_unavailable",
             )
-            parsed = result.model_dump()
-            applied = _apply_extraction(candidate, parsed)
-        except Exception as exc:
-            log.warning("detail_reply_parse_failed", error=str(exc),
-                        candidate_id=str(request.candidate_id))
 
-    request.status = DetailRequestStatus.RECEIVED
-    request.received_at = dt.datetime.now(dt.timezone.utc)
-    request.reply_raw_text = text or None
-    request.parsed_values = parsed
-    db.flush()
+        request.status = DetailRequestStatus.RECEIVED
+        request.received_at = dt.datetime.now(dt.timezone.utc)
+        request.reply_raw_text = text or None
+        request.parsed_values = parsed
+        db.flush()
 
-    log_event(db, "DETAILS_RECEIVED", candidate_id=request.candidate_id,
-              metadata={"applied": applied})
-    return applied
+        log_event(db, "DETAILS_RECEIVED", candidate_id=request.candidate_id,
+                  metadata={"applied": applied})
+        step["applied_fields"] = applied
+        step["applied_count"] = len(applied)
+        return applied

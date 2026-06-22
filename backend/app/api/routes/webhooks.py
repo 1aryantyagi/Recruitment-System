@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.agents.telephonic_screening import next_turn, opening_line
 from app.config import settings
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_step
 from app.database.base import SessionLocal
 from app.integrations.twilio import client as twilio
 from app.models import CallLog, Candidate, Requisition
@@ -57,32 +57,39 @@ async def twilio_answer(request: Request):
     if form is None:
         return Response(content=twilio.twiml_say_hangup("Unauthorized."), media_type="application/xml", status_code=403)
     sid = form.get("CallSid")
+    log.info("webhooks.twilio_answer.received", call_sid=sid)
     opening = opening_line()
     db = SessionLocal()
     streaming_call_id = None
-    try:
-        call = db.execute(select(CallLog).where(CallLog.twilio_call_sid == sid)).scalar_one_or_none()
-        if call is not None:
-            if settings.voice_streaming_enabled:
-                # Hand the call to the Media Streams bridge, which builds the greeting
-                # and transcript itself (speech-to-speech). Don't seed the transcript here.
-                streaming_call_id = str(call.id)
-                if call.status == CallStatus.INITIATED:
-                    call.status = CallStatus.IN_PROGRESS
-                db.commit()
+    with log_step(log, "webhooks.twilio_answer", call_sid=sid) as step:
+        try:
+            call = db.execute(select(CallLog).where(CallLog.twilio_call_sid == sid)).scalar_one_or_none()
+            if call is not None:
+                step["call_log_id"] = str(call.id)
+                if settings.voice_streaming_enabled:
+                    # Hand the call to the Media Streams bridge, which builds the greeting
+                    # and transcript itself (speech-to-speech). Don't seed the transcript here.
+                    streaming_call_id = str(call.id)
+                    if call.status == CallStatus.INITIATED:
+                        call.status = CallStatus.IN_PROGRESS
+                    db.commit()
+                    step["mode"] = "streaming"
+                else:
+                    cand = db.get(Candidate, call.candidate_id)
+                    role = ""
+                    if call.requisition_id:
+                        req = db.get(Requisition, call.requisition_id)
+                        role = req.title if req else ""
+                    opening = opening_line(candidate_name=cand.full_name if cand else "", role=role)
+                    call.transcript = f"Agent: {opening}"
+                    if call.status == CallStatus.INITIATED:
+                        call.status = CallStatus.IN_PROGRESS
+                    db.commit()
+                    step["mode"] = "gather"
             else:
-                cand = db.get(Candidate, call.candidate_id)
-                role = ""
-                if call.requisition_id:
-                    req = db.get(Requisition, call.requisition_id)
-                    role = req.title if req else ""
-                opening = opening_line(candidate_name=cand.full_name if cand else "", role=role)
-                call.transcript = f"Agent: {opening}"
-                if call.status == CallStatus.INITIATED:
-                    call.status = CallStatus.IN_PROGRESS
-                db.commit()
-    finally:
-        db.close()
+                step["call_found"] = False
+        finally:
+            db.close()
     if streaming_call_id is not None:
         return Response(content=twilio.twiml_stream(streaming_call_id), media_type="application/xml")
     return Response(content=twilio.twiml_gather(opening, _turn_action_url(1)), media_type="application/xml")
@@ -109,6 +116,8 @@ def _run_turn(sid: str | None, speech: str, turn: int) -> tuple[str, str]:
         directive = next_turn(questions=questions, transcript=transcript,
                               candidate_speech=speech, turn_index=turn, role=role)
         reply = directive.reply or "Thank you for your time. Goodbye."
+        log.info("webhooks.twilio_turn.agent_decision", call_sid=sid, turn=turn,
+                 action=directive.action, next_prompt=reply)
         call.transcript = f"{transcript}\nAgent: {reply}".strip()
         if directive.action == "end_unavailable":
             call.status = CallStatus.CALLBACK_REQUESTED
@@ -131,6 +140,7 @@ async def twilio_turn(request: Request):
         turn = int(request.query_params.get("turn", "1"))
     except (TypeError, ValueError):
         turn = 1
+    log.info("webhooks.twilio_turn.received", call_sid=sid, turn=turn, has_speech=bool(speech))
 
     action, reply = await run_in_threadpool(_run_turn, sid, speech, turn)
 
@@ -153,33 +163,40 @@ async def twilio_status(request: Request, background: BackgroundTasks):
     call_status = (form.get("CallStatus") or "").lower()
     recording_url = form.get("RecordingUrl")
     mapped = _STATUS_MAP.get(call_status)
+    log.info("webhooks.twilio_status.received", call_sid=sid, twilio_status=call_status,
+             mapped_status=mapped.value if mapped else None, has_recording=bool(recording_url))
 
     db = SessionLocal()
     call_log_id = None
     final_status = None
     already_done = False
-    try:
-        call = db.execute(select(CallLog).where(CallLog.twilio_call_sid == sid)).scalar_one_or_none()
-        if call is None:
-            return Response(status_code=204)
-        # Don't downgrade a call whose conversational outcome is already decided
-        # (e.g. the candidate asked for a callback → CALLBACK_REQUESTED).
-        if mapped and call.status not in _TERMINAL_STATUSES:
-            call.status = mapped
-        if recording_url:
-            call.recording_url = recording_url
-        db.commit()
-        call_log_id = str(call.id)
-        final_status = call.status
-        # Post-call evaluation writes screening_answers, so that — not the live
-        # transcript — is the "already processed" marker for idempotency.
-        already_done = bool(call.screening_answers)
-    finally:
-        db.close()
+    with log_step(log, "webhooks.twilio_status", call_sid=sid) as step:
+        try:
+            call = db.execute(select(CallLog).where(CallLog.twilio_call_sid == sid)).scalar_one_or_none()
+            if call is None:
+                step["call_found"] = False
+                return Response(status_code=204)
+            # Don't downgrade a call whose conversational outcome is already decided
+            # (e.g. the candidate asked for a callback → CALLBACK_REQUESTED).
+            if mapped and call.status not in _TERMINAL_STATUSES:
+                call.status = mapped
+            if recording_url:
+                call.recording_url = recording_url
+            db.commit()
+            call_log_id = str(call.id)
+            final_status = call.status
+            step["call_log_id"] = call_log_id
+            # Post-call evaluation writes screening_answers, so that — not the live
+            # transcript — is the "already processed" marker for idempotency.
+            already_done = bool(call.screening_answers)
+        finally:
+            db.close()
 
     # Process a genuinely completed screening (transcribe + evaluate) asynchronously.
     # Skip callbacks: a candidate who asked to be called back was never screened.
     if (mapped == CallStatus.COMPLETED and call_log_id and not already_done
             and final_status != CallStatus.CALLBACK_REQUESTED):
         background.add_task(flow.run_screening_processing, call_log_id, recording_url)
+        log.info("webhooks.twilio_status.dispatch_background", call_log_id=call_log_id,
+                 has_recording=bool(recording_url))
     return Response(status_code=204)

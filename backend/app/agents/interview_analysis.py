@@ -16,7 +16,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.core.events import log_event
-from app.core.logging import get_logger
+from app.core.logging import get_logger, log_step
 from app.database.base import SessionLocal
 from app.integrations.stt import client as stt
 from app.integrations.storage import local as storage
@@ -48,42 +48,76 @@ def _cfg(config) -> dict:
 
 
 def store_recording(state: AnalysisState, config) -> dict:
-    cfg = _cfg(config)
-    recording_bytes = cfg.get("recording_bytes")
-    filename = cfg.get("recording_filename", "interview.mp3")
-    if recording_bytes:
-        key = storage.save_file(recording_bytes, filename, subdir="recordings")
-        return {"recording_url": key}
-    return {"recording_url": state.get("recording_url")}
+    with log_step(log, "agent.analysis.store_recording", interview_id=state.get("interview_id")) as step:
+        cfg = _cfg(config)
+        recording_bytes = cfg.get("recording_bytes")
+        filename = cfg.get("recording_filename", "interview.mp3")
+        if recording_bytes:
+            step["size_bytes"] = len(recording_bytes)
+            key = storage.save_file(recording_bytes, filename, subdir="recordings")
+            step["recording_url"] = key
+            return {"recording_url": key}
+        step["recording_url"] = state.get("recording_url")
+        return {"recording_url": state.get("recording_url")}
 
 
 def transcribe(state: AnalysisState, config) -> dict:
-    cfg = _cfg(config)
-    text = stt.transcribe(
-        audio_url=state.get("recording_url") if not cfg.get("recording_bytes") else None,
-        audio_bytes=cfg.get("recording_bytes"),
-        filename=cfg.get("recording_filename", "interview.mp3"),
-    )
-    return {"transcript": text}
+    with log_step(log, "agent.analysis.transcribe", interview_id=state.get("interview_id")) as step:
+        cfg = _cfg(config)
+        text = stt.transcribe(
+            audio_url=state.get("recording_url") if not cfg.get("recording_bytes") else None,
+            audio_bytes=cfg.get("recording_bytes"),
+            filename=cfg.get("recording_filename", "interview.mp3"),
+        )
+        step["transcript_chars"] = len(text or "")
+        return {"transcript": text}
 
 
 def llm_analyze(state: AnalysisState, config) -> dict:
     transcript = (state.get("transcript") or "").strip()
-    if not transcript or not llm.llm_available():
-        return {"analysis": InterviewAnalysis(summary="Analysis unavailable — manual review required.").model_dump()}
-    try:
-        human = f'INTERVIEW TRANSCRIPT:\n"""\n{transcript[:30000]}\n"""'
-        result = llm.complete_structured("analysis", _ANALYZE_SYSTEM, human, InterviewAnalysis, max_tokens=4000)
-        return {"analysis": result.model_dump()}
-    except Exception as exc:
-        log.warning("analysis_llm_failed", error=str(exc))
-        return {"analysis": InterviewAnalysis(summary="Analysis failed — manual review required.").model_dump()}
+    with log_step(
+        log,
+        "agent.analysis.llm_analyze",
+        interview_id=state.get("interview_id"),
+        transcript_chars=len(transcript),
+    ) as step:
+        if not transcript or not llm.llm_available():
+            log.info(
+                "agent.analysis.llm_unavailable",
+                interview_id=state.get("interview_id"),
+                reason="empty_transcript" if not transcript else "llm_not_configured",
+            )
+            step["llm_used"] = False
+            return {"analysis": InterviewAnalysis(summary="Analysis unavailable — manual review required.").model_dump()}
+        try:
+            human = f'INTERVIEW TRANSCRIPT:\n"""\n{transcript[:30000]}\n"""'
+            with log_step(
+                log,
+                "agent.analysis.llm_analyze.call",
+                tier="analysis",
+                prompt_chars=len(human),
+            ) as call:
+                result = llm.complete_structured("analysis", _ANALYZE_SYSTEM, human, InterviewAnalysis, max_tokens=4000)
+                analysis = result.model_dump()
+                call["overall_rating"] = analysis.get("overall_rating")
+                call["recommendation"] = analysis.get("recommendation")
+            step["llm_used"] = True
+            step["overall_rating"] = analysis.get("overall_rating")
+            return {"analysis": analysis}
+        except Exception as exc:
+            log.warning("analysis_llm_failed", error=str(exc), exc_info=True,
+                        interview_id=state.get("interview_id"))
+            step["llm_used"] = False
+            return {"analysis": InterviewAnalysis(summary="Analysis failed — manual review required.").model_dump()}
 
 
 def persist(state: AnalysisState, config) -> dict:
+  with log_step(log, "agent.analysis.persist", interview_id=state.get("interview_id")) as step:
     db = _cfg(config)["db"]
     interview = db.get(Interview, uuid.UUID(state["interview_id"]))
     if interview is None:
+        log.warning("agent.analysis.interview_not_found", interview_id=state.get("interview_id"))
+        step["found"] = False
         return {}
     analysis = state["analysis"]
     interview.recording_url = state.get("recording_url")
@@ -107,6 +141,9 @@ def persist(state: AnalysisState, config) -> dict:
 
     log_event(db, EventType.ANALYSIS_COMPLETED, candidate_id=interview.candidate_id,
               requisition_id=interview.requisition_id, metadata={"overall_rating": interview.ai_overall_rating})
+    step["found"] = True
+    step["overall_rating"] = interview.ai_overall_rating
+    step["status"] = interview.status.value if hasattr(interview.status, "value") else str(interview.status)
     return {}
 
 
@@ -114,12 +151,14 @@ def trigger_agent6(state: AnalysisState, config) -> dict:
     # Chain feedback-collection notification (§7.6) within the same transaction.
     from app.agents.feedback_collection import notify_for_interview
 
-    db = _cfg(config)["db"]
-    try:
-        notify_for_interview(interview_id=state["interview_id"], db=db)
-    except Exception as exc:
-        log.warning("agent6_chain_failed", error=str(exc))
-    return {}
+    with log_step(log, "agent.analysis.trigger_agent6", interview_id=state.get("interview_id")):
+        db = _cfg(config)["db"]
+        try:
+            notify_for_interview(interview_id=state["interview_id"], db=db)
+        except Exception as exc:
+            log.warning("agent6_chain_failed", error=str(exc), exc_info=True,
+                        interview_id=state.get("interview_id"))
+        return {}
 
 
 def build_analysis_graph():
@@ -149,7 +188,13 @@ def analyze_interview(*, interview_id: str, recording_bytes: bytes | None = None
     config = {"configurable": {"db": session, "recording_bytes": recording_bytes,
                                "recording_filename": recording_filename}}
     try:
-        _GRAPH.invoke({"interview_id": str(interview_id), "recording_url": recording_url}, config=config)
+        with log_step(
+            log,
+            "agent.analysis.run",
+            interview_id=str(interview_id),
+            has_recording_bytes=recording_bytes is not None,
+        ):
+            _GRAPH.invoke({"interview_id": str(interview_id), "recording_url": recording_url}, config=config)
         if own:
             session.commit()
         return {"interview_id": str(interview_id), "status": "ANALYZED"}

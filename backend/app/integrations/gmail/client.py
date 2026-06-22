@@ -111,7 +111,7 @@ def _mark_disabled(error: str, db=None) -> None:
     except Exception as exc:
         if own:
             session.rollback()
-        log.warning("gmail_mark_disabled_failed", error=str(exc))
+        log.warning("gmail_mark_disabled_failed", error=str(exc), exc_info=True)
     finally:
         if own:
             session.close()
@@ -141,7 +141,7 @@ def _persist_refreshed(creds, db=None) -> None:
     except Exception as exc:
         if own:
             session.rollback()
-        log.warning("gmail_persist_failed", error=str(exc))
+        log.warning("gmail_persist_failed", error=str(exc), exc_info=True)
     finally:
         if own:
             session.close()
@@ -252,16 +252,18 @@ def _ensure_credentials(db=None):
             _cache["creds"], _cache["mode"] = creds, mode
 
     if not creds.valid:
+        log.debug("gmail.refresh_token.start", auth_mode=mode)
         try:
             creds.refresh(Request())
         except RefreshError as exc:
             _handle_refresh_error(mode, str(exc), db=db)
             return None
         except Exception as exc:  # transient network/etc — don't disable, just skip this poll
-            log.warning("gmail_refresh_failed", auth_mode=mode, error=str(exc))
+            log.warning("gmail_refresh_failed", auth_mode=mode, error=str(exc), exc_info=True)
             return None
         with _lock:
             _backoff.clear()  # any success resets the backoff window
+        log.debug("gmail.refresh_token.end", auth_mode=mode)
         if mode == "oauth_db":
             _persist_refreshed(creds, db=db)
     return creds
@@ -407,12 +409,15 @@ def disconnect(db=None) -> None:
 def fetch_unread_resumes(max_results: int = 10, db=None) -> list[dict]:
     """Return [{message_id, sender, filename, mime_type, content}] for unread
     emails carrying resume attachments. Empty list if Gmail is not configured."""
+    log.info("gmail.fetch.start", max_results=max_results, auth_mode=current_auth_mode(db))
     if not gmail_configured(db):
+        log.info("gmail.fetch.end", configured=False, count=0)
         return []
     out: list[dict] = []
     try:
         svc = _service(db)
         if svc is None:
+            log.info("gmail.fetch.end", service=False, count=0)
             return out
         listing = (
             svc.users().messages()
@@ -447,8 +452,10 @@ def fetch_unread_resumes(max_results: int = 10, db=None) -> list[dict]:
                     "content": content,
                 })
     except Exception as exc:  # graceful degradation
-        log.warning("gmail_fetch_failed", error=str(exc))
+        log.warning("gmail_fetch_failed", error=str(exc), exc_info=True)
+        log.info("gmail.fetch.end", count=len(out), error=True)
         return out
+    log.info("gmail.fetch.end", count=len(out))
     return out
 
 
@@ -474,17 +481,21 @@ def _extract_plain_text(payload: dict) -> str:
 
 
 def mark_read(message_id: str, db=None) -> None:
+    log.info("gmail.mark_read.start", message_id=message_id)
     if not gmail_configured(db):
+        log.info("gmail.mark_read.end", configured=False, message_id=message_id)
         return
     try:
         svc = _service(db)
         if svc is None:
+            log.info("gmail.mark_read.end", service=False, message_id=message_id)
             return
         svc.users().messages().modify(
             userId="me", id=message_id, body={"removeLabelIds": ["UNREAD"]}
         ).execute()
+        log.info("gmail.mark_read.end", message_id=message_id)
     except Exception as exc:
-        log.warning("gmail_mark_read_failed", error=str(exc), message_id=message_id)
+        log.warning("gmail_mark_read_failed", error=str(exc), message_id=message_id, exc_info=True)
 
 
 # ---------------- outbound + reply intake (detail-collection flow) ----------------
@@ -498,11 +509,14 @@ def send_reply(*, to: str, subject: str, body: str, thread_id: str | None = None
     Returns the sent message id, or None when Gmail is unavailable or the send
     fails — graceful degradation, never raises into the poll loop. Works under the
     existing `gmail.modify` scope."""
+    log.info("gmail.send.start", to=to, threaded=bool(thread_id))
     if not gmail_configured(db):
+        log.info("gmail.send.end", configured=False, to=to)
         return None
     try:
         svc = _service(db)
         if svc is None:
+            log.info("gmail.send.end", service=False, to=to)
             return None
         mime = MIMEText(body or "", "plain", "utf-8")
         mime["To"] = to
@@ -514,9 +528,12 @@ def send_reply(*, to: str, subject: str, body: str, thread_id: str | None = None
         if thread_id:
             send_body["threadId"] = thread_id
         sent = svc.users().messages().send(userId="me", body=send_body).execute()
-        return sent.get("id")
+        message_id = sent.get("id")
+        log.info("gmail.send.end", to=to, message_id=message_id)
+        return message_id
     except Exception as exc:
-        log.warning("gmail_send_failed", error=str(exc), to=to)
+        log.warning("gmail_send_failed", error=str(exc), to=to, exc_info=True)
+        log.info("gmail.send.end", to=to, error=True)
         return None
 
 
@@ -526,7 +543,10 @@ def fetch_thread_replies(thread_ids, max_results: int = 20, db=None) -> list[dic
     detail-request email. Excludes attachments so it never collides with the
     resume poller. Empty list if Gmail is unconfigured or nothing matches."""
     wanted = {t for t in (thread_ids or []) if t}
+    log.info("gmail.fetch_replies.start", thread_count=len(wanted), max_results=max_results)
     if not wanted or not gmail_configured(db):
+        log.info("gmail.fetch_replies.end", count=0,
+                 reason="no_threads" if not wanted else "not_configured")
         return []
     out: list[dict] = []
     try:
@@ -551,6 +571,8 @@ def fetch_thread_replies(thread_ids, max_results: int = 20, db=None) -> list[dic
                 "body": _extract_plain_text(msg.get("payload", {})),
             })
     except Exception as exc:  # graceful degradation
-        log.warning("gmail_fetch_replies_failed", error=str(exc))
+        log.warning("gmail_fetch_replies_failed", error=str(exc), exc_info=True)
+        log.info("gmail.fetch_replies.end", count=len(out), error=True)
         return out
+    log.info("gmail.fetch_replies.end", count=len(out))
     return out

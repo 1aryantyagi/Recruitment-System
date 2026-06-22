@@ -120,6 +120,24 @@ class UpdateInterviewRequest(BaseModel):
     status: str
 
 
+class AssignInterviewerRequest(BaseModel):
+    interviewer_id: str
+
+
+class InterviewerSlotRequest(BaseModel):
+    slot_time: str = Field(description="Local time-of-day, 'HH:MM' (e.g. '16:30')")
+    weekday_mask: int = Field(default=0b0011111, ge=0, le=0b1111111,
+                              description="Bitmask of weekdays (Mon=bit0 … Sun=bit6); default Mon–Fri")
+    duration_minutes: int = Field(default=60, ge=15, le=240)
+
+
+class UpdateInterviewerSlotRequest(BaseModel):
+    slot_time: str | None = None
+    weekday_mask: int | None = Field(default=None, ge=0, le=0b1111111)
+    duration_minutes: int | None = Field(default=None, ge=15, le=240)
+    is_active: bool | None = None
+
+
 class FeedbackRequest(BaseModel):
     human_summary: str | None = None
     human_strengths: str | None = None
