@@ -67,6 +67,8 @@ frontend/            # Next.js 15 + TypeScript + Tailwind + recharts
 **Prereqs:** Python 3.12+, Node 20–24 LTS (see `.nvmrc`; avoid Node 25+ for the
 Next.js dev server), Docker.
 
+**macOS / Linux**
+
 ```bash
 cp .env.example .env        # then fill in keys (OpenAI etc.) — see table below
                             # ENCRYPTION_KEY: python -c "import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
@@ -76,7 +78,7 @@ docker compose up -d db
 
 # 2. Backend
 cd backend
-python3 -m venv .venv 
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 alembic upgrade head
@@ -89,6 +91,35 @@ npm install
 cp .env.local.example .env.local               # NEXT_PUBLIC_API_URL=http://localhost:8000
 npm run dev                                    # http://localhost:3000
 ```
+
+**Windows (PowerShell)**
+
+```powershell
+Copy-Item .env.example .env   # then fill in keys (OpenAI etc.) — see table below
+                              # ENCRYPTION_KEY: python -c "import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
+
+# 1. Database (host port 5434 to avoid clashing with other local Postgres)
+docker compose up -d db
+
+# 2. Backend
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+alembic upgrade head
+python -m scripts.seed
+uvicorn app.main:app --reload --port 8000      # Swagger: http://localhost:8000/docs
+
+# 3. Frontend
+cd ..\frontend
+npm install
+Copy-Item .env.local.example .env.local        # NEXT_PUBLIC_API_URL=http://localhost:8000
+npm run dev                                    # http://localhost:3000
+```
+
+> **Windows (Command Prompt):** use `copy .env.example .env` and
+> `copy .env.local.example .env.local` instead of `Copy-Item`. Activate the venv
+> with `.venv\Scripts\activate.bat`.
 
 **Dev logins (seeded):**
 
@@ -167,6 +198,9 @@ For a Workspace domain only (cannot impersonate a personal `@gmail.com`):
 > version control. Stored OAuth tokens are encrypted at rest with `ENCRYPTION_KEY`.
 
 ## Tests
+
+Activate the backend venv first (`source .venv/bin/activate` on macOS/Linux;
+`.\.venv\Scripts\Activate.ps1` on Windows), then:
 
 ```bash
 cd backend
