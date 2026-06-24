@@ -10,6 +10,7 @@ import {
   CalendarClock,
   CalendarPlus,
   CheckCircle2,
+  ChevronDown,
   Clock,
   FileText,
   Linkedin,
@@ -25,7 +26,7 @@ import { toast } from "sonner";
 import { apiGet, apiPost } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useFetch } from "@/lib/hooks";
-import type { CandidateDetail } from "@/lib/types";
+import type { CandidateCall, CandidateDetail } from "@/lib/types";
 import {
   cn,
   formatCurrency,
@@ -40,6 +41,7 @@ import { InterviewStatusBadge, StageBadge } from "@/components/common/badges";
 import { InitialsAvatar } from "@/components/common/avatar-name";
 import { ErrorState, LoadingState } from "@/components/common/states";
 import { BlacklistModal } from "@/components/candidates/blacklist-modal";
+import { RolePipeline } from "@/components/candidates/role-pipeline";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -237,20 +239,30 @@ export default function CandidateDetailPage() {
               </Card>
             </TabsContent>
 
-            <TabsContent value="applications" className="mt-4 space-y-2">
+            <TabsContent value="applications" className="mt-4 space-y-3">
               {c.applications?.length ? (
-                c.applications.map((a) => (
-                  <Card key={a.id} className="flex-row items-center gap-3 p-4">
-                    <Briefcase className="text-muted-foreground size-4" />
-                    <Link href={`/jobs/${a.requisition_id}`} className="flex-1 text-sm font-medium hover:underline">
-                      {a.requisition_id.slice(0, 8)}…
-                    </Link>
-                    {a.match_score != null && (
-                      <span className="text-muted-foreground text-xs tabular-nums">{scoreToPercent(a.match_score)} match</span>
-                    )}
-                    <StageBadge status={a.status} />
-                  </Card>
-                ))
+                c.applications.map((a) => {
+                  const title = c.scores?.find(
+                    (s) => s.requisition_id === a.requisition_id,
+                  )?.requisition_title;
+                  return (
+                    <Card key={a.id} className="gap-3 p-4">
+                      <div className="flex items-center gap-3">
+                        <Briefcase className="text-muted-foreground size-4 shrink-0" />
+                        <Link href={`/jobs/${a.requisition_id}`} className="flex-1 truncate text-sm font-medium hover:underline">
+                          {title ?? `${a.requisition_id.slice(0, 8)}…`}
+                        </Link>
+                        {a.match_score != null && (
+                          <span className="text-muted-foreground text-xs tabular-nums">{scoreToPercent(a.match_score)} match</span>
+                        )}
+                        <StageBadge status={a.status} />
+                      </div>
+                      <Separator />
+                      <p className="text-muted-foreground text-xs font-medium">Hiring stages</p>
+                      <RolePipeline c={c} requisitionId={a.requisition_id} />
+                    </Card>
+                  );
+                })
               ) : (
                 <Card className="p-5"><EmptyTab text="Not applied to any requisitions." /></Card>
               )}
@@ -284,23 +296,7 @@ export default function CandidateDetailPage() {
 
             <TabsContent value="calls" className="mt-4 space-y-2">
               {c.calls?.length ? (
-                c.calls.map((call) => (
-                  <Card key={call.id} className="gap-2 p-4">
-                    <div className="flex items-center gap-3">
-                      <PhoneCall className="text-muted-foreground size-4" />
-                      <span className="text-sm font-medium">{titleCase(call.status)}</span>
-                      {call.ai_score != null && (
-                        <Badge variant="info" className="ml-auto">AI {scoreToPercent(call.ai_score)}</Badge>
-                      )}
-                    </div>
-                    {call.transcript && (
-                      <p className="text-muted-foreground line-clamp-2 pl-7 text-xs">{call.transcript}</p>
-                    )}
-                    {call.called_at && (
-                      <p className="text-muted-foreground pl-7 text-xs">{formatDateTime(call.called_at)}</p>
-                    )}
-                  </Card>
-                ))
+                c.calls.map((call) => <CallCard key={call.id} call={call} />)
               ) : (
                 <Card className="p-5"><EmptyTab text="No screening calls yet." /></Card>
               )}
@@ -334,6 +330,49 @@ function RiskRow({ label, ok, value }: { label: string; ok: boolean; value: stri
 
 function EmptyTab({ text }: { text: string }) {
   return <p className="text-muted-foreground py-8 text-center text-sm">{text}</p>;
+}
+
+function CallCard({ call }: { call: CandidateCall }) {
+  const [open, setOpen] = useState(false);
+  // Only offer a toggle when the transcript is long enough to be clipped.
+  const isLong = (call.transcript?.length ?? 0) > 160;
+
+  return (
+    <Card className="gap-2 p-4">
+      <div className="flex items-center gap-3">
+        <PhoneCall className="text-muted-foreground size-4" />
+        <span className="text-sm font-medium">{titleCase(call.status)}</span>
+        {call.ai_score != null && (
+          <Badge variant="info" className="ml-auto">AI {scoreToPercent(call.ai_score)}</Badge>
+        )}
+      </div>
+      {call.transcript && (
+        <div className="pl-7">
+          <p
+            className={cn(
+              "text-muted-foreground text-xs leading-relaxed",
+              open ? "whitespace-pre-wrap" : "line-clamp-2",
+            )}
+          >
+            {call.transcript}
+          </p>
+          {isLong && (
+            <button
+              type="button"
+              onClick={() => setOpen((v) => !v)}
+              className="text-primary mt-1.5 inline-flex items-center gap-1 text-xs font-medium hover:underline"
+            >
+              {open ? "Show less" : "Show full transcript"}
+              <ChevronDown className={cn("size-3 transition-transform", open && "rotate-180")} />
+            </button>
+          )}
+        </div>
+      )}
+      {call.called_at && (
+        <p className="text-muted-foreground pl-7 text-xs">{formatDateTime(call.called_at)}</p>
+      )}
+    </Card>
+  );
 }
 
 function Timeline({ candidate }: { candidate: CandidateDetail }) {
