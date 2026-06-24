@@ -78,9 +78,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# In development, Next.js may bind to an alternate port (3001, …) or the LAN IP
+# when 3000 is taken — allow those origins without weakening production CORS.
+_dev_origin_regex = (
+    r"https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3})(:\d+)?"
+    if settings.app_env == "development"
+    else None
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_base_url, "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[settings.frontend_base_url],
+    allow_origin_regex=_dev_origin_regex,
     allow_credentials=True,
     # Scoped to what the frontend actually uses rather than a blanket wildcard.
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
