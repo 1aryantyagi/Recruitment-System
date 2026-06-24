@@ -67,14 +67,23 @@ def _load_context(call_log_id: str) -> dict | None:
             db.commit()
             log.debug("media_stream.load_context.status_advanced", call_log_id=call_log_id,
                       status=CallStatus.IN_PROGRESS.value)
+        # Only let the agent offer scheduling when there is ≥1 genuinely free slot
+        # (panel + active templates, minus internal bookings and real Teams busy
+        # times). Probing here keeps the prompt honest instead of entering the
+        # scheduling branch and then awkwardly deferring on an empty slot list.
+        open_slot_count = (
+            len(interview_slots.get_open_slots(db, requisition_id=call.requisition_id))
+            if call.requisition_id else 0
+        )
+        has_slots = open_slot_count > 0
         log.debug("media_stream.load_context.end", call_log_id=call_log_id, role=role,
                   candidate_name=cand_name, question_count=len(questions),
-                  has_slots=bool(call.requisition_id))
+                  has_slots=has_slots, open_slot_count=open_slot_count)
         return {
             "questions": questions,
             "role": role,
             "candidate_name": cand_name,
-            "has_slots": bool(call.requisition_id),
+            "has_slots": has_slots,
         }
     finally:
         db.close()

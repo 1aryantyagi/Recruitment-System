@@ -537,6 +537,38 @@ def send_reply(*, to: str, subject: str, body: str, thread_id: str | None = None
         return None
 
 
+def send_email(*, to: str, subject: str, body: str, db=None) -> dict | None:
+    """Send a plain-text email on a NEW thread and return
+    ``{"message_id", "thread_id"}`` (Gmail's send response carries the threadId).
+
+    Used to start a trackable thread (e.g. an interviewer feedback request) whose
+    reply is later matched back by `thread_id` via `fetch_thread_replies`. Returns
+    None when Gmail is unavailable or the send fails — graceful degradation, never
+    raises into the poll loop. Works under the existing `gmail.modify` scope."""
+    log.info("gmail.send_email.start", to=to)
+    if not gmail_configured(db):
+        log.info("gmail.send_email.end", configured=False, to=to)
+        return None
+    try:
+        svc = _service(db)
+        if svc is None:
+            log.info("gmail.send_email.end", service=False, to=to)
+            return None
+        mime = MIMEText(body or "", "plain", "utf-8")
+        mime["To"] = to
+        mime["Subject"] = subject
+        send_body = {"raw": base64.urlsafe_b64encode(mime.as_bytes()).decode("ascii")}
+        sent = svc.users().messages().send(userId="me", body=send_body).execute()
+        result = {"message_id": sent.get("id"), "thread_id": sent.get("threadId")}
+        log.info("gmail.send_email.end", to=to, message_id=result["message_id"],
+                 thread_id=result["thread_id"])
+        return result
+    except Exception as exc:
+        log.warning("gmail_send_email_failed", error=str(exc), to=to, exc_info=True)
+        log.info("gmail.send_email.end", to=to, error=True)
+        return None
+
+
 def fetch_thread_replies(thread_ids, max_results: int = 20, db=None) -> list[dict]:
     """Return [{message_id, thread_id, sender, body}] for unread, attachment-free
     messages whose Gmail thread is in `thread_ids` — i.e. candidate replies to a

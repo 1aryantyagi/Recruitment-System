@@ -57,9 +57,11 @@ GET_SLOTS_TOOL = {
     "description": (
         "Fetch the open interview slots the candidate can book. Call this once you have "
         "judged the candidate qualified and they are willing to schedule. Returns a list "
-        "of slots, each with an interviewer_id, a start_iso (UTC), and a human label. "
-        "Offer ONLY these slots; if the list is empty, tell the candidate someone will "
-        "reach out to schedule and end the call."
+        "of slots, each with an interviewer_id, a start_iso (UTC), an interviewer_name, and "
+        "a human 'label' that already names the interviewer and time (e.g. 'Tue 24 Jun, "
+        "4:30 PM with Alice'). Offer ONLY these slots, reading the label so the candidate "
+        "hears who they'll meet and when; if the list is empty, tell the candidate someone "
+        "will reach out to schedule and end the call."
     ),
     "parameters": {"type": "object", "properties": {}},
 }

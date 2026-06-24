@@ -1,9 +1,10 @@
 """Interview routes (§8.6)."""
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, Request, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -16,7 +17,7 @@ from app.core.events import log_audit
 from app.core.logging import get_logger
 from app.core.responses import Pagination, list_envelope, pagination_params, single
 from app.database.base import get_db
-from app.models import Interview, User
+from app.models import Candidate, Interview, Requisition, User
 from app.models.enums import InterviewStatus, UserRole
 from app.schemas.api import FeedbackRequest, ScheduleInterviewRequest, UpdateInterviewRequest
 from app.services import flow
@@ -45,6 +46,64 @@ def create_interview(
              interviewer_id=body.interviewer_id, round_type=body.round_type, created_by=str(user.id))
     interview = db.get(Interview, uuid.UUID(result["interview_id"]))
     return single(interview_dict(interview, with_feedback=True, db=db))
+
+
+@router.get("")
+def list_all_interviews(
+    pagination: Pagination = Depends(pagination_params),
+    date_from: str | None = Query(default=None, alias="from",
+                                  description="ISO date/datetime lower bound on scheduled_at"),
+    date_to: str | None = Query(default=None, alias="to",
+                                description="ISO date/datetime upper bound on scheduled_at"),
+    status: str | None = Query(default=None),
+    interviewer_id: str | None = Query(default=None),
+    requisition_id: str | None = Query(default=None),
+    analyzed: bool | None = Query(default=None, description="Only AI-analyzed interviews"),
+    needs_feedback: bool | None = Query(default=None,
+                                        description="Completed interviews without submitted human feedback"),
+    db: Session = Depends(get_db),
+    user: User = Depends(_HR_DM_ADMIN),
+):
+    """Global interview list across all candidates — powers the calendar and the
+    evaluations queue. Candidate-scoped history stays at GET /interviews/{candidate_id}."""
+    stmt = (
+        select(Interview, Candidate.full_name, Requisition.title)
+        .join(Candidate, Candidate.id == Interview.candidate_id)
+        .join(Requisition, Requisition.id == Interview.requisition_id, isouter=True)
+    )
+    if date_from:
+        stmt = stmt.where(Interview.scheduled_at >= _parse_dt(date_from))
+    if date_to:
+        stmt = stmt.where(Interview.scheduled_at <= _parse_dt(date_to))
+    if status:
+        try:
+            stmt = stmt.where(Interview.status == InterviewStatus(status))
+        except ValueError as exc:
+            raise BadRequestError(f"Invalid status: {status}") from exc
+    if interviewer_id:
+        stmt = stmt.where(Interview.interviewer_id == _uuid(interviewer_id))
+    if requisition_id:
+        stmt = stmt.where(Interview.requisition_id == _uuid(requisition_id))
+    if analyzed is True:
+        stmt = stmt.where(Interview.analysis_completed_at.isnot(None))
+    if needs_feedback is True:
+        stmt = stmt.where(Interview.status == InterviewStatus.COMPLETED)
+    stmt = stmt.order_by(Interview.scheduled_at.desc().nullslast(), Interview.created_at.desc())
+
+    total = db.execute(
+        select(func.count()).select_from(stmt.order_by(None).subquery())
+    ).scalar() or 0
+    rows = db.execute(stmt.limit(pagination.limit).offset(pagination.offset)).all()
+    items = []
+    for iv, cand_name, req_title in rows:
+        d = interview_dict(iv, with_feedback=True, db=db)
+        d["candidate_name"] = cand_name
+        d["requisition_title"] = req_title
+        items.append(d)
+    if needs_feedback is True:
+        items = [d for d in items if not (d.get("feedback") or {}).get("is_submitted")]
+    log.debug("route.interviews.list_all", total=total, returned=len(items))
+    return list_envelope(items, total, pagination.page, pagination.limit)
 
 
 @router.get("/{candidate_id}")
@@ -159,3 +218,14 @@ def _uuid(value: str):
         return uuid.UUID(str(value))
     except (ValueError, TypeError) as exc:
         raise BadRequestError("Invalid id") from exc
+
+
+def _parse_dt(value: str) -> dt.datetime:
+    """Parse an ISO date or datetime; bare dates become midnight UTC."""
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise BadRequestError(f"Invalid date: {value}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed

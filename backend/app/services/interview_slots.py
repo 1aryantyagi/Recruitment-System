@@ -28,6 +28,7 @@ from app.agents.interview_scheduling import schedule_interview
 from app.config import settings
 from app.core.errors import BadRequestError
 from app.core.logging import get_logger, log_step
+from app.integrations.ms_graph import client as ms_graph
 from app.models import Interview, InterviewerSlot, RequisitionInterviewer, User
 from app.models.enums import InterviewStatus, RoundType
 
@@ -38,6 +39,9 @@ _ACTIVE_STATUSES = (InterviewStatus.SCHEDULED, InterviewStatus.RESCHEDULED)
 # Assumed length of an already-booked interview when checking overlap (we don't
 # store per-interview duration).
 _ASSUMED_BOOKED_MINUTES = 60
+# MS Graph getSchedule statuses that make an interviewer unavailable for a slot.
+# (free / workingElsewhere / unknown do NOT block.)
+_GRAPH_BUSY_STATUSES = {"busy", "tentative", "oof"}
 
 
 def company_tz() -> ZoneInfo:
@@ -62,15 +66,18 @@ class SlotOption:
 
     @property
     def label(self) -> str:
-        """Human phrasing for the voice agent, e.g. 'Mon 23 Jun, 4:30 PM'."""
+        """Human phrasing for the voice agent, e.g. 'Mon 23 Jun, 4:30 PM with Alice'."""
         # %-I (no leading zero) is POSIX; fall back to lstrip for portability.
-        return self.start_local.strftime("%a %d %b, %I:%M %p").replace(" 0", " ")
+        base = self.start_local.strftime("%a %d %b, %I:%M %p").replace(" 0", " ")
+        return f"{base} with {self.interviewer_name}" if self.interviewer_name else base
 
     def to_dict(self) -> dict:
         return {
             "interviewer_id": self.interviewer_id,
             "interviewer_name": self.interviewer_name,
             "start_utc": self.start_utc.isoformat(),
+            # Alias of start_utc under the name the Realtime book_interview tool
+            "start_iso": self.start_utc.isoformat(),
             "start_local": self.start_local.isoformat(),
             "label": self.label,
             "duration_minutes": self.duration_minutes,
@@ -166,6 +173,85 @@ def filter_booked(
     return free
 
 
+def filter_busy_intervals(
+    candidates: list[SlotOption],
+    busy: list[tuple[str, dt.datetime, dt.datetime]],
+) -> list[SlotOption]:
+    """Drop candidate slots overlapping a real busy interval for the same
+    interviewer. ``busy`` is [(interviewer_id, start_utc, end_utc)] with precise,
+    variable-length intervals — unlike :func:`filter_booked`, which assumes a fixed
+    60-min block for internal interview rows (an all-day/OOF block would otherwise
+    only mask one hour)."""
+    by_interviewer: dict[str, list[tuple[dt.datetime, dt.datetime]]] = {}
+    for iid, start, end in busy:
+        by_interviewer.setdefault(str(iid), []).append(
+            (start.astimezone(dt.timezone.utc), end.astimezone(dt.timezone.utc))
+        )
+    free: list[SlotOption] = []
+    for c in candidates:
+        c_end = c.start_utc + dt.timedelta(minutes=c.duration_minutes)
+        existing = by_interviewer.get(c.interviewer_id, ())
+        # Half-open overlap: touching at a boundary does not clash.
+        if any(c.start_utc < b_end and b_start < c_end for b_start, b_end in existing):
+            continue
+        free.append(c)
+    log.debug("slots.filter_busy_intervals", candidate_count=len(candidates),
+              busy_count=len(busy), free_count=len(free))
+    return free
+
+
+def _parse_graph_dt(node: dict | None) -> dt.datetime | None:
+    """Parse a Graph ``{dateTime, timeZone}`` node into a tz-aware UTC datetime.
+
+    Graph returns UTC as a tz-naive string with 7 fractional digits and no offset,
+    so we attach UTC; if ``timeZone`` echoes a non-UTC zone we honour it. Returns
+    ``None`` on any parse failure so the caller fails open (skips the item)."""
+    if not node:
+        return None
+    raw = node.get("dateTime")
+    if not raw:
+        return None
+    tzname = node.get("timeZone") or "UTC"
+    try:
+        text = str(raw).replace("Z", "")
+        if "." in text:  # trim sub-second to 6 digits (Python's max)
+            head, frac = text.split(".", 1)
+            text = f"{head}.{frac[:6]}"
+        parsed = dt.datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            zone = dt.timezone.utc if tzname.upper() == "UTC" else ZoneInfo(tzname)
+            parsed = parsed.replace(tzinfo=zone)
+        return parsed.astimezone(dt.timezone.utc)
+    except Exception:
+        log.debug("slots.parse_graph_dt.failed", value=str(raw), tz=str(tzname))
+        return None
+
+
+def _parse_busy(
+    schedule: dict,
+    interviewer_by_email: dict[str, str],
+) -> list[tuple[str, dt.datetime, dt.datetime]]:
+    """Convert a Graph getSchedule response into precise busy intervals keyed by
+    interviewer_id. Skips errored schedules, unknown emails, non-busy items, and
+    unparseable times — all fail-open."""
+    out: list[tuple[str, dt.datetime, dt.datetime]] = []
+    for entry in (schedule or {}).get("value", []):
+        if not isinstance(entry, dict) or entry.get("error"):
+            continue
+        email = str(entry.get("scheduleId") or "").lower()
+        interviewer_id = interviewer_by_email.get(email)
+        if not interviewer_id:
+            continue
+        for item in entry.get("scheduleItems") or []:
+            if str(item.get("status") or "").lower() not in _GRAPH_BUSY_STATUSES:
+                continue
+            start = _parse_graph_dt(item.get("start"))
+            end = _parse_graph_dt(item.get("end"))
+            if start and end and end > start:
+                out.append((interviewer_id, start, end))
+    return out
+
+
 # ---------------- DB-backed API ----------------
 def get_open_slots(db, *, requisition_id, now: dt.datetime | None = None,
                    limit: int | None = None) -> list[SlotOption]:
@@ -182,7 +268,7 @@ def get_open_slots(db, *, requisition_id, now: dt.datetime | None = None,
                   start_date=window[0].isoformat(), end_date=window[1].isoformat())
 
         rows = db.execute(
-            select(InterviewerSlot, User.name)
+            select(InterviewerSlot, User.name, User.email)
             .join(RequisitionInterviewer,
                   RequisitionInterviewer.interviewer_id == InterviewerSlot.interviewer_id)
             .join(User, User.id == InterviewerSlot.interviewer_id)
@@ -194,8 +280,15 @@ def get_open_slots(db, *, requisition_id, now: dt.datetime | None = None,
         ).all()
         templates = [
             SlotTemplate(str(s.interviewer_id), name, s.slot_time, s.weekday_mask, s.duration_minutes)
-            for s, name in rows
+            for s, name, _email in rows
         ]
+        # interviewer_id ↔ email maps for the real free/busy lookup below.
+        email_by_interviewer: dict[str, str] = {
+            str(s.interviewer_id): email for s, _name, email in rows if email
+        }
+        interviewer_by_email: dict[str, str] = {
+            email.lower(): str(s.interviewer_id) for s, _name, email in rows if email
+        }
         log.debug("slots.get_open.templates", requisition_id=str(requisition_id),
                   template_count=len(templates))
         candidates = expand_templates(templates, window, now_local, tz)
@@ -222,6 +315,29 @@ def get_open_slots(db, *, requisition_id, now: dt.datetime | None = None,
                   range_lo=lo.isoformat(), range_hi=hi.isoformat(),
                   booked_count=len(booked))
         free = filter_booked(candidates, [(str(iid), sa) for iid, sa in booked])
+
+        # Drop slots clashing with the interviewers' REAL calendars (Teams/Outlook
+        # free-busy via MS Graph getSchedule). Fail-open: any mock/error/permission
+        # failure leaves `free` as the internal-only result.
+        emails = sorted({e.strip() for e in email_by_interviewer.values() if e.strip()})
+        if free and emails:
+            start_iso = lo.strftime("%Y-%m-%dT%H:%M:%S")
+            end_iso = hi.strftime("%Y-%m-%dT%H:%M:%S")
+            try:
+                schedule = ms_graph.get_availability(emails, start_iso, end_iso)
+            except Exception as exc:
+                log.warning("slots.get_open.freebusy_error", error=str(exc), exc_info=True)
+                schedule = {}
+            busy = _parse_busy(schedule, interviewer_by_email)
+            if busy:
+                before = len(free)
+                free = filter_busy_intervals(free, busy)
+                log.debug("slots.get_open.freebusy", email_count=len(emails),
+                          busy_block_count=len(busy), dropped=before - len(free))
+            else:
+                log.debug("slots.get_open.freebusy_skipped",
+                          email_count=len(emails), reason="mock_or_empty")
+
         result = free[:limit] if limit else free
         step["free_count"] = len(free)
         step["returned_count"] = len(result)

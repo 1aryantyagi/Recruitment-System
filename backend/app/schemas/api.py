@@ -156,6 +156,31 @@ class BlacklistRequest(BaseModel):
     note: str | None = None
 
 
+class CreateTeamsMappingRequest(BaseModel):
+    """Admin: map a hiring domain to its Microsoft Teams group/channel."""
+
+    domain_id: str
+    teams_group_name: str
+    teams_team_id: str
+    teams_channel_id: str
+    is_active: bool = True
+
+
+class UpdateTeamsMappingRequest(BaseModel):
+    teams_group_name: str | None = None
+    teams_team_id: str | None = None
+    teams_channel_id: str | None = None
+    is_active: bool | None = None
+
+
 class CreateApplicationRequest(BaseModel):
     candidate_id: str
     requisition_id: str
+
+
+class UpdateApplicationStatusRequest(BaseModel):
+    """Move a pipeline application to a new stage (Kanban drag-and-drop)."""
+
+    status: str = Field(description="Target ApplicationStatus, e.g. NEW | SCREENING | …")
+    reason_id: str | None = None
+    reason_note: str | None = None

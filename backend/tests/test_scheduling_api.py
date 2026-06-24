@@ -64,6 +64,96 @@ def test_slot_crud_requires_admin(client, hr_headers):
     assert r.status_code == 403
 
 
+def test_open_slots_labels_name_the_interviewer():
+    """get_open_slots labels include the interviewer name (so the agent speaks it)."""
+    from app.models import Requisition
+    from app.services.interview_slots import get_open_slots
+    from sqlalchemy import select
+
+    db = SessionLocal()
+    try:
+        req = db.execute(select(Requisition).filter_by(title="Associate AI Engineer")).scalar_one()
+        slots = get_open_slots(db, requisition_id=req.id)
+        if not slots:
+            pytest.skip("no open slots in the current window")
+        assert all(" with " in s.label for s in slots)
+    finally:
+        db.close()
+
+
+def test_real_freebusy_drops_clashing_slot_and_fails_open(monkeypatch):
+    """A real busy block on the interviewer's calendar drops the overlapping slot;
+    an empty/failed Graph response fails open (slots unchanged)."""
+    import datetime as dt
+
+    import app.integrations.ms_graph.client as ms_graph
+    from app.models import Requisition, User
+    from app.services.interview_slots import get_open_slots
+    from sqlalchemy import select
+
+    db = SessionLocal()
+    try:
+        req = db.execute(select(Requisition).filter_by(title="Associate AI Engineer")).scalar_one()
+        # Baseline with a guaranteed-empty Graph response (fail-open path).
+        monkeypatch.setattr(ms_graph, "get_availability", lambda *a, **k: {})
+        baseline = get_open_slots(db, requisition_id=req.id)
+        if not baseline:
+            pytest.skip("no open slots in the current window")
+        target = baseline[0]
+        email = db.get(User, uuid.UUID(target.interviewer_id)).email
+
+        # Now report that interviewer busy over the target slot → it must drop.
+        def _busy(emails, start_iso, end_iso):
+            s = target.start_utc.strftime("%Y-%m-%dT%H:%M:%S")
+            e = (target.start_utc + dt.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S")
+            return {"value": [{
+                "scheduleId": email,
+                "scheduleItems": [{
+                    "status": "busy",
+                    "start": {"dateTime": s, "timeZone": "UTC"},
+                    "end": {"dateTime": e, "timeZone": "UTC"},
+                }],
+            }]}
+
+        monkeypatch.setattr(ms_graph, "get_availability", _busy)
+        after = get_open_slots(db, requisition_id=req.id)
+        assert not any(s.interviewer_id == target.interviewer_id and s.start_utc == target.start_utc
+                       for s in after)
+        # Fail-open: empty response leaves the target slot offerable again.
+        monkeypatch.setattr(ms_graph, "get_availability", lambda *a, **k: {})
+        assert any(s.interviewer_id == target.interviewer_id and s.start_utc == target.start_utc
+                   for s in get_open_slots(db, requisition_id=req.id))
+    finally:
+        db.close()
+
+
+def test_infer_requisition_id_from_active_application():
+    """A screening call with no requisition infers it from the candidate's active
+    application; a candidate with none yields None."""
+    from app.agents.telephonic_screening import _infer_requisition_id
+    from app.models import JobApplication, Requisition
+    from app.models.enums import ApplicationStatus
+    from sqlalchemy import select
+
+    db = SessionLocal()
+    try:
+        req = db.execute(select(Requisition).filter_by(title="Associate AI Engineer")).scalar_one()
+        cand = Candidate(full_name="Infer Test", email=f"infer-{uuid.uuid4().hex}@test.local",
+                         source=CandidateSource.OTHER)
+        db.add(cand)
+        db.flush()
+
+        assert _infer_requisition_id(db, str(cand.id)) is None  # no application yet
+
+        db.add(JobApplication(candidate_id=cand.id, requisition_id=req.id,
+                              status=ApplicationStatus.SCREENING))
+        db.flush()
+        assert _infer_requisition_id(db, str(cand.id)) == str(req.id)
+    finally:
+        db.rollback()
+        db.close()
+
+
 def test_book_slot_and_reject_double_booking():
     """Service-level: booking an open slot succeeds; re-booking the same slot is
     rejected. Runs in a transaction that is rolled back to avoid polluting seed."""

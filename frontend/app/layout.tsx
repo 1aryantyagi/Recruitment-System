@@ -1,11 +1,15 @@
 import type { Metadata } from "next";
 import "./globals.css";
+
+import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider } from "@/lib/auth";
-import { ToastProvider } from "@/components/ui/Toast";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Toaster } from "@/components/ui/sonner";
 
 export const metadata: Metadata = {
-  title: "Recruitment ATS",
-  description: "Internal applicant tracking system",
+  title: "Talent OS — AI Recruitment",
+  description:
+    "AI-powered recruitment operating system: ATS, multi-agent automation, and hiring analytics.",
 };
 
 export default function RootLayout({
@@ -14,11 +18,19 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className="antialiased">
-        <AuthProvider>
-          <ToastProvider>{children}</ToastProvider>
-        </AuthProvider>
+    <html lang="en" suppressHydrationWarning>
+      <body className="bg-background text-foreground min-h-screen antialiased">
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <AuthProvider>
+            <TooltipProvider delayDuration={200}>{children}</TooltipProvider>
+            <Toaster position="top-right" />
+          </AuthProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

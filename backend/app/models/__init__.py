@@ -2,6 +2,11 @@
 and Alembic). Re-exports the common model classes."""
 from app.models.auth import RefreshToken
 from app.models.candidate import Candidate, CandidateDetailRequest, CandidateResume
+from app.models.feedback import (
+    DomainTeamsMapping,
+    InterviewFeedbackMessage,
+    InterviewFeedbackRequest,
+)
 from app.models.integration import IntegrationCredential
 from app.models.interview import CallLog, Interview, InterviewFeedback
 from app.models.logs import (
@@ -31,6 +36,9 @@ __all__ = [
     "Candidate",
     "CandidateResume",
     "CandidateDetailRequest",
+    "DomainTeamsMapping",
+    "InterviewFeedbackRequest",
+    "InterviewFeedbackMessage",
     "IntegrationCredential",
     "Requisition",
     "RequisitionSkill",

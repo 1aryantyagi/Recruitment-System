@@ -72,6 +72,24 @@ class Settings(BaseSettings):
     # resume (CTC, notice, availability, shift/work-mode), and parse their replies.
     detail_collection_enabled: bool = True
 
+    # ---- Interview feedback collection (Teams + email) ----
+    # Master switch for the post-interview feedback workflow (detection, request
+    # emails, Teams/email monitoring, reminders, escalation).
+    feedback_collection_enabled: bool = True
+    # How often the feedback poll cycle runs (separate APScheduler job).
+    feedback_poll_interval_minutes: int = 5
+    # Grace period after scheduled_at before an interview is assumed concluded and
+    # feedback collection starts (the spec's "2:00 PM scheduled, 2:30 PM -> done").
+    interview_completion_buffer_minutes: int = 30
+    # Auto-advance the JobApplication from the extracted recommendation (NO ->
+    # REJECTED; STRONG_YES/YES on a final round -> OFFERED). Off keeps it record-only.
+    feedback_auto_advance_enabled: bool = True
+    # Minimum LLM confidence to accept a Teams message as feedback for a candidate.
+    feedback_match_min_confidence: float = 0.6
+    # Optional override recipient for 72h escalation; blank -> requisition hiring
+    # manager (falling back to the interview creator).
+    feedback_escalation_email: str = ""
+
     # ---- Database ----
     postgres_host: str = "localhost"
     postgres_port: int = 5434

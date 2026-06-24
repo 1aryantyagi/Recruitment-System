@@ -12,9 +12,12 @@ from zoneinfo import ZoneInfo
 from app.services.interview_slots import (
     SlotOption,
     SlotTemplate,
+    _parse_busy,
+    _parse_graph_dt,
     compute_booking_window,
     expand_templates,
     filter_booked,
+    filter_busy_intervals,
     get_open_slots,
 )
 
@@ -127,5 +130,106 @@ def test_slot_label_is_human_readable():
     assert "4:30 PM" in label
 
 
+def test_slot_label_names_interviewer():
+    assert _slot(MON, 16, 30).label.endswith("with Alice")
+
+
+def test_slot_label_without_name_is_time_only():
+    local = _at(MON, 16, 30)
+    s = SlotOption("i-x", "", local.astimezone(dt.timezone.utc), local, 60)
+    assert "with" not in s.label
+
+
 def test_get_open_slots_no_requisition_returns_empty_without_db():
     assert get_open_slots(None, requisition_id=None) == []
+
+
+# ---------------- filter_busy_intervals (real free/busy) ----------------
+def _utc(d: dt.date, h: int, m: int = 0) -> dt.datetime:
+    return _at(d, h, m).astimezone(dt.timezone.utc)
+
+
+def test_filter_busy_drops_overlap_keeps_boundary_touch():
+    slot = _slot(WED, 16, 30)  # 16:30–17:30 IST
+    # Busy ending exactly at slot start (half-open → keep), and one overlapping by 1 min.
+    touch = [("i-alice", _utc(WED, 15, 30), _utc(WED, 16, 30))]
+    assert filter_busy_intervals([slot], touch) == [slot]
+    overlap = [("i-alice", _utc(WED, 17, 29), _utc(WED, 18, 0))]
+    assert filter_busy_intervals([slot], overlap) == []
+
+
+def test_filter_busy_all_day_block_drops_slot():
+    slot = _slot(WED, 16, 30)
+    all_day = [("i-alice", _utc(WED, 0, 0), _utc(THU, 0, 0))]
+    assert filter_busy_intervals([slot], all_day) == []
+
+
+def test_filter_busy_other_interviewer_is_ignored():
+    slot = _slot(WED, 16, 30, iid="i-alice")
+    busy_bob = [("i-bob", _utc(WED, 16, 30), _utc(WED, 17, 30))]
+    assert filter_busy_intervals([slot], busy_bob) == [slot]
+
+
+# ---------------- _parse_graph_dt ----------------
+def test_parse_graph_dt_utc_with_seven_fractional_digits():
+    parsed = _parse_graph_dt({"dateTime": "2026-06-24T11:00:00.0000000", "timeZone": "UTC"})
+    assert parsed == dt.datetime(2026, 6, 24, 11, 0, tzinfo=dt.timezone.utc)
+
+
+def test_parse_graph_dt_handles_z_suffix():
+    parsed = _parse_graph_dt({"dateTime": "2026-06-24T11:00:00Z", "timeZone": "UTC"})
+    assert parsed == dt.datetime(2026, 6, 24, 11, 0, tzinfo=dt.timezone.utc)
+
+
+def test_parse_graph_dt_non_utc_zone_converts():
+    # 16:30 IST == 11:00 UTC
+    parsed = _parse_graph_dt({"dateTime": "2026-06-24T16:30:00", "timeZone": "Asia/Kolkata"})
+    assert parsed == dt.datetime(2026, 6, 24, 11, 0, tzinfo=dt.timezone.utc)
+
+
+def test_parse_graph_dt_malformed_or_missing_returns_none():
+    assert _parse_graph_dt({"dateTime": "not-a-date", "timeZone": "UTC"}) is None
+    assert _parse_graph_dt({"timeZone": "UTC"}) is None
+    assert _parse_graph_dt(None) is None
+
+
+# ---------------- _parse_busy ----------------
+def _busy_item(status, start_iso, end_iso):
+    return {"status": status,
+            "start": {"dateTime": start_iso, "timeZone": "UTC"},
+            "end": {"dateTime": end_iso, "timeZone": "UTC"}}
+
+
+def test_parse_busy_maps_busy_items_and_skips_free():
+    sched = {"value": [{
+        "scheduleId": "alice@x.com",
+        "scheduleItems": [
+            _busy_item("busy", "2026-06-24T11:00:00.0000000", "2026-06-24T11:30:00.0000000"),
+            _busy_item("free", "2026-06-24T12:00:00.0000000", "2026-06-24T12:30:00.0000000"),
+            _busy_item("tentative", "2026-06-24T13:00:00.0000000", "2026-06-24T13:30:00.0000000"),
+        ],
+    }]}
+    out = _parse_busy(sched, {"alice@x.com": "i-alice"})
+    assert len(out) == 2  # busy + tentative; free skipped
+    assert all(iid == "i-alice" for iid, _s, _e in out)
+
+
+def test_parse_busy_case_insensitive_email_and_skips_unknown_and_errored():
+    sched = {"value": [
+        {"scheduleId": "Alice@X.com",  # mixed case → matches lower-keyed map
+         "scheduleItems": [_busy_item("oof", "2026-06-24T11:00:00.0000000",
+                                      "2026-06-24T11:30:00.0000000")]},
+        {"scheduleId": "stranger@x.com",  # unknown → skipped
+         "scheduleItems": [_busy_item("busy", "2026-06-24T11:00:00.0000000",
+                                      "2026-06-24T11:30:00.0000000")]},
+        {"scheduleId": "bob@x.com", "error": {"message": "no access"},  # errored → skipped
+         "scheduleItems": [_busy_item("busy", "2026-06-24T11:00:00.0000000",
+                                      "2026-06-24T11:30:00.0000000")]},
+    ]}
+    out = _parse_busy(sched, {"alice@x.com": "i-alice", "bob@x.com": "i-bob"})
+    assert [iid for iid, _s, _e in out] == ["i-alice"]
+
+
+def test_parse_busy_empty_or_missing_value_is_empty():
+    assert _parse_busy({}, {"alice@x.com": "i-alice"}) == []
+    assert _parse_busy({"value": []}, {"alice@x.com": "i-alice"}) == []

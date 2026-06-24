@@ -111,8 +111,10 @@ def realtime_instructions(*, questions: list[str], role: str = "", candidate_nam
             "status='complete', qualified=false, scheduled=false.\n"
             "- If QUALIFIED: tell them they've cleared the screening and you'd like to set up the "
             "interview, then call the get_available_slots tool.\n"
-            "  • It returns open slots, each with interviewer_id, start_iso, and a spoken 'label'. "
-            "Offer the candidate two or three of these by their label and let them choose.\n"
+            "  • It returns open slots, each with interviewer_id, start_iso, interviewer_name, and a "
+            "spoken 'label' that already names the interviewer (e.g. 'Tue 24 Jun, 4:30 PM with Alice'). "
+            "Offer the candidate two or three of these by their label — naming the interviewer and "
+            "time — and let them choose.\n"
             "  • When they pick one, call book_interview with that slot's EXACT interviewer_id and "
             "start_iso. If it returns ok=true, confirm the day and time and that a calendar invite "
             "will be emailed, then call end_screening with status='complete', qualified=true, "
@@ -270,6 +272,50 @@ def validate_no_active_call(state: StartState, config) -> dict:
         return {}
 
 
+# Application statuses that are terminal — a call should not target a closed pipeline.
+_TERMINAL_APP = (ApplicationStatus.REJECTED, ApplicationStatus.WITHDRAWN)
+
+
+def _infer_requisition_id(db, candidate_id: str) -> str | None:
+    """Pick the requisition a screening call should target when none was supplied:
+    the candidate's non-terminal JobApplication with the highest pipeline rank
+    (reusing ``_STATUS_RANK``), tie-broken by most recent activity. Returns None
+    when there is no active application — the call then runs as screening-only."""
+    rows = db.execute(
+        select(JobApplication).where(
+            JobApplication.candidate_id == uuid.UUID(candidate_id),
+            JobApplication.status.not_in(_TERMINAL_APP),
+        )
+    ).scalars().all()
+    if not rows:
+        return None
+    rows.sort(
+        key=lambda a: (_STATUS_RANK.get(a.status, -1), a.updated_at or a.created_at),
+        reverse=True,
+    )
+    return str(rows[0].requisition_id)
+
+
+def resolve_requisition(state: StartState, config) -> dict:
+    """Fill in requisition_id from the candidate's active application when the caller
+    didn't pass one, so the live agent can offer + book an interview. An explicitly
+    supplied requisition_id always wins (this node no-ops). Runs before
+    ``generate_questions`` so questions and ``CallLog.requisition_id`` both pick it up."""
+    with log_step(log, "screening.resolve_requisition",
+                  candidate_id=state.get("candidate_id"),
+                  supplied=bool(state.get("requisition_id"))) as step:
+        if state.get("requisition_id"):
+            step["resolved"] = "explicit"
+            return {}
+        db = _db(config)
+        rid = _infer_requisition_id(db, state["candidate_id"])
+        step["resolved"] = "inferred" if rid else "none"
+        step["requisition_id"] = rid
+        log.info("screening.resolve_requisition.result",
+                 candidate_id=state.get("candidate_id"), inferred_requisition_id=rid)
+        return {"requisition_id": rid} if rid else {}
+
+
 def generate_questions(state: StartState, config) -> dict:
     with log_step(log, "screening.generate_questions",
                   requisition_id=state.get("requisition_id")) as step:
@@ -358,11 +404,13 @@ def persist_initiated(state: StartState, config) -> dict:
 def build_start_graph():
     g = StateGraph(StartState)
     g.add_node("validate", validate_no_active_call)
+    g.add_node("resolve_requisition", resolve_requisition)
     g.add_node("generate_questions", generate_questions)
     g.add_node("initiate_call", initiate_call)
     g.add_node("persist", persist_initiated)
     g.add_edge(START, "validate")
-    g.add_edge("validate", "generate_questions")
+    g.add_edge("validate", "resolve_requisition")
+    g.add_edge("resolve_requisition", "generate_questions")
     g.add_edge("generate_questions", "initiate_call")
     g.add_edge("initiate_call", "persist")
     g.add_edge("persist", END)

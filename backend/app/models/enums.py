@@ -121,6 +121,24 @@ class Recommendation(str, enum.Enum):
     STRONG_NO = "STRONG_NO"
 
 
+class FeedbackRequestStatus(str, enum.Enum):
+    """interview_feedback_requests.status — lifecycle of an interview's automated
+    feedback-collection cycle (Teams + email monitoring)."""
+
+    AWAITING = "AWAITING"     # interview concluded; monitoring Teams + email for feedback
+    RECEIVED = "RECEIVED"     # a valid feedback source has been captured
+    ESCALATED = "ESCALATED"   # 72h passed with no feedback; hiring manager notified (still monitored)
+
+
+class FeedbackSource(str, enum.Enum):
+    """Where a piece of interview feedback came from."""
+
+    TEAMS = "TEAMS"               # posted in a domain Microsoft Teams hiring channel
+    EMAIL = "EMAIL"               # interviewer's email reply
+    FORM = "FORM"                 # human submission via the feedback form (POST /interviews/{id}/feedback)
+    AI_ANALYSIS = "AI_ANALYSIS"   # produced by Agent 5 from a recording transcript
+
+
 class EventType(str, enum.Enum):
     """analytics_events.event_type values (stored as varchar)."""
 
@@ -130,7 +148,11 @@ class EventType(str, enum.Enum):
     CALL_COMPLETED = "CALL_COMPLETED"
     INTERVIEW_SCHEDULED = "INTERVIEW_SCHEDULED"
     ANALYSIS_COMPLETED = "ANALYSIS_COMPLETED"
+    FEEDBACK_REQUESTED = "FEEDBACK_REQUESTED"
+    FEEDBACK_RECEIVED = "FEEDBACK_RECEIVED"
     FEEDBACK_SUBMITTED = "FEEDBACK_SUBMITTED"
+    FEEDBACK_REMINDER_SENT = "FEEDBACK_REMINDER_SENT"
+    FEEDBACK_ESCALATED = "FEEDBACK_ESCALATED"
     STATUS_CHANGED = "STATUS_CHANGED"
     HIRED = "HIRED"
     REJECTED = "REJECTED"
@@ -145,3 +167,7 @@ from sqlalchemy import Enum as _SAEnum  # noqa: E402
 work_mode_enum = _SAEnum(WorkMode, name="work_mode")
 shift_preference_enum = _SAEnum(ShiftPreference, name="shift_preference")
 application_status_enum = _SAEnum(ApplicationStatus, name="application_status")
+# Recommendation is shared by interview_feedback + interview_feedback_messages;
+# feedback_source by interview_feedback + interview_feedback_messages.
+recommendation_enum = _SAEnum(Recommendation, name="recommendation")
+feedback_source_enum = _SAEnum(FeedbackSource, name="feedback_source")

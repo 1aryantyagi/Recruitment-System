@@ -22,10 +22,12 @@ from app.core.errors import AppError
 from app.core.logging import configure_logging, get_logger, log_step
 from app.api.routes import (
     analytics,
+    applications,
     auth,
     candidates,
     files,
     integrations_gmail,
+    integrations_teams,
     interviews,
     media_stream,
     meta,
@@ -178,9 +180,10 @@ async def unhandled_handler(request: Request, exc: Exception):
 
 
 # ---------------- Routers ----------------
-for r in (auth.router, candidates.router, requisitions.router, skills.router, meta.router,
-          users.router, screening.router, interviews.router, analytics.router,
-          webhooks.router, media_stream.router, files.router, integrations_gmail.router):
+for r in (auth.router, candidates.router, requisitions.router, applications.router,
+          skills.router, meta.router, users.router, screening.router, interviews.router,
+          analytics.router, webhooks.router, media_stream.router, files.router,
+          integrations_gmail.router, integrations_teams.router):
     app.include_router(r)
 
 

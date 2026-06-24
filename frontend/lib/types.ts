@@ -217,6 +217,8 @@ export interface CandidateInterview {
   ai_overall_rating?: number | null;
   ai_analysis?: unknown;
   feedback?: unknown;
+  feedback_status?: FeedbackCollectionStatus | null;
+  feedback_source?: FeedbackSource | null;
 }
 
 export interface CandidateDetail extends CandidateListItem {
@@ -327,6 +329,20 @@ export interface NamedEntity {
   name: string;
 }
 
+/** Admin mapping of a hiring domain to its Microsoft Teams group/channel. */
+export interface TeamsDomainMapping {
+  id: string;
+  domain_id: string;
+  domain: string | null;
+  teams_group_name: string;
+  teams_team_id: string;
+  teams_channel_id: string;
+  is_active: boolean;
+  last_synced_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export interface StatusReason {
   id: string;
   status: string;
@@ -369,6 +385,11 @@ export interface OpenSlot {
 }
 
 // ===== Interviews =====
+/** Automated feedback-collection cycle status (Teams + email monitoring). */
+export type FeedbackCollectionStatus = "AWAITING" | "RECEIVED" | "ESCALATED";
+/** Which channel produced the feedback. */
+export type FeedbackSource = "TEAMS" | "EMAIL" | "FORM" | "AI_ANALYSIS";
+
 export interface Interview {
   id: string;
   candidate_id?: string;
@@ -382,6 +403,8 @@ export interface Interview {
   ai_overall_rating?: number | null;
   ai_analysis?: unknown;
   feedback?: InterviewFeedback | null;
+  feedback_status?: FeedbackCollectionStatus | null;
+  feedback_source?: FeedbackSource | null;
 }
 
 export interface InterviewFeedback {
@@ -444,4 +467,54 @@ export interface DashboardAnalytics {
     overall_avg_days?: number | null;
     hired_count?: number | null;
   };
+  /** Present when requested with ?summary=true (LLM digest). */
+  summary?: string | null;
+}
+
+// ===== Applications (Kanban board) =====
+export interface ApplicationBoardCandidate {
+  id: string;
+  full_name: string;
+  current_designation?: string | null;
+  current_company?: string | null;
+  current_location?: string | null;
+  total_experience_years?: number | null;
+}
+
+export interface ApplicationBoardItem {
+  id: string;
+  status: ApplicationStatus;
+  match_score?: number | null;
+  rejection_reason?: string | null;
+  updated_at?: string | null;
+  candidate: ApplicationBoardCandidate;
+  requisition: { id: string; title: string };
+  resume_score?: number | null;
+  owner?: User | null;
+  latest_interview?: {
+    id: string;
+    status: InterviewStatus;
+    round_type: RoundType;
+    ai_overall_rating?: number | null;
+  } | null;
+}
+
+// ===== Interviews (global list — calendar & evaluations) =====
+export interface InterviewListItem {
+  id: string;
+  candidate_id: string;
+  requisition_id?: string | null;
+  interviewer?: { id: string; name: string; email: string } | null;
+  round_number?: number | null;
+  round_type: RoundType;
+  status: InterviewStatus;
+  scheduled_at?: string | null;
+  meeting_link?: string | null;
+  ai_overall_rating?: number | null;
+  ai_analysis?: unknown;
+  has_recording?: boolean;
+  analysis_completed_at?: string | null;
+  feedback?: InterviewFeedback | null;
+  candidate_name?: string | null;
+  requisition_title?: string | null;
 }

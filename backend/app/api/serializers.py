@@ -21,9 +21,11 @@ from app.models import (
     CallLog,
     Department,
     Domain,
+    DomainTeamsMapping,
     Interview,
     InterviewerSlot,
     InterviewFeedback,
+    InterviewFeedbackRequest,
     JobApplication,
     PipelineStatusReason,
     Requisition,
@@ -278,6 +280,20 @@ def interview_dict(i: Interview, with_feedback: bool = False, db: Session | None
         "has_recording": bool(i.recording_url),
         "analysis_completed_at": _iso(i.analysis_completed_at),
     }
+    # Feedback-collection status/source (Teams + email workflow). feedback_status
+    # comes from the request cycle (AWAITING/RECEIVED/ESCALATED); source is the
+    # winning channel (TEAMS/EMAIL/FORM/AI_ANALYSIS).
+    fb_source = _enum(i.feedback.source) if (i.feedback and i.feedback.source) else None
+    fb_status = None
+    if db is not None:
+        req = db.execute(select(InterviewFeedbackRequest).where(
+            InterviewFeedbackRequest.interview_id == i.id)).scalar_one_or_none()
+        if req is not None:
+            fb_status = _enum(req.status)
+            if fb_source is None and req.source:
+                fb_source = _enum(req.source)
+    d["feedback_status"] = fb_status
+    d["feedback_source"] = fb_source
     if with_feedback:
         d["feedback"] = feedback_dict(i.feedback)
     return d
@@ -305,6 +321,21 @@ def interviewer_slot_dict(s: InterviewerSlot) -> dict:
 
 def domain_dict(d: Domain) -> dict:
     return {"id": str(d.id), "name": d.name}
+
+
+def domain_teams_mapping_dict(m: DomainTeamsMapping) -> dict:
+    return {
+        "id": str(m.id),
+        "domain_id": str(m.domain_id),
+        "domain": m.domain.name if m.domain else None,
+        "teams_group_name": m.teams_group_name,
+        "teams_team_id": m.teams_team_id,
+        "teams_channel_id": m.teams_channel_id,
+        "is_active": m.is_active,
+        "last_synced_at": _iso(m.last_synced_at),
+        "created_at": _iso(m.created_at),
+        "updated_at": _iso(m.updated_at),
+    }
 
 
 def department_dict(d: Department) -> dict:

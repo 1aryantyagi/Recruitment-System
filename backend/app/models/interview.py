@@ -22,8 +22,9 @@ from app.models.common import created_at_col, fk_col, pk_col, updated_at_col
 from app.models.enums import (
     CallStatus,
     InterviewStatus,
-    Recommendation,
     RoundType,
+    feedback_source_enum,
+    recommendation_enum,
 )
 
 
@@ -112,7 +113,9 @@ class InterviewFeedback(Base):
     problem_solving_rating = Column(Integer, nullable=True)
     culture_fit_rating = Column(Integer, nullable=True)
     overall_rating = Column(Integer, nullable=True)
-    recommendation = Column(SAEnum(Recommendation, name="recommendation"), nullable=True)
+    recommendation = Column(recommendation_enum, nullable=True)
+    # Which channel produced the canonical (first-won) feedback: TEAMS | EMAIL | FORM | AI_ANALYSIS.
+    source = Column(feedback_source_enum, nullable=True)
     is_submitted = Column(Boolean, nullable=False, default=False)
     submitted_at = Column(DateTime(timezone=True), nullable=True)
     last_updated_at = Column(DateTime(timezone=True), nullable=True)
