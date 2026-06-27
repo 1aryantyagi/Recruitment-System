@@ -102,9 +102,16 @@ function GmailIntegration() {
   const connect = async () => {
     setBusy(true);
     try {
-      const res = await apiGet<{ url?: string; auth_url?: string }>("/integrations/gmail/connect");
-      const url = res.url ?? res.auth_url;
-      if (url) window.location.href = url;
+      const res = await apiGet<{ authorization_url?: string; url?: string; auth_url?: string }>(
+        "/integrations/gmail/connect",
+      );
+      const url = res.authorization_url ?? res.url ?? res.auth_url;
+      if (url) {
+        window.location.href = url;
+        return;
+      }
+      toast.error("Could not start Gmail authorization — no consent URL returned.");
+      setBusy(false);
     } catch (err) {
       toast.error((err as Error).message);
       setBusy(false);

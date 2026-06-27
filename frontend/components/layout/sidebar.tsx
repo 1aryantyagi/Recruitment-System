@@ -2,11 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Sparkles } from "lucide-react";
 
 import { NAV_SECTIONS } from "@/lib/nav";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
+import { Logo } from "@/components/logo/logo";
 import {
   Tooltip,
   TooltipContent,
@@ -17,19 +17,13 @@ export function SidebarBrand({ collapsed }: { collapsed?: boolean }) {
   return (
     <Link
       href="/dashboard"
-      className="flex h-16 items-center gap-2.5 px-4 outline-none"
-    >
-      <div className="bg-primary text-primary-foreground flex size-9 shrink-0 items-center justify-center rounded-xl shadow-sm">
-        <Sparkles className="size-5" />
-      </div>
-      {!collapsed && (
-        <div className="leading-tight">
-          <p className="text-sm font-semibold tracking-tight">Talent OS</p>
-          <p className="text-muted-foreground text-[10px] font-medium tracking-wider uppercase">
-            AI Recruitment
-          </p>
-        </div>
+      className={cn(
+        "flex h-16 items-center px-4 outline-none",
+        collapsed && "justify-center px-0",
       )}
+      aria-label="Talent OS — AI Recruitment"
+    >
+      <Logo priority collapsed={collapsed} />
     </Link>
   );
 }

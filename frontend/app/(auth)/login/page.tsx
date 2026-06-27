@@ -9,7 +9,6 @@ import {
   Bot,
   CalendarClock,
   Loader2,
-  Sparkles,
   Users,
 } from "lucide-react";
 
@@ -17,6 +16,7 @@ import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Logo } from "@/components/logo/logo";
 
 const DEMO = [
   { label: "HR", email: "hr@local.dev", password: "hr123" },
@@ -61,12 +61,7 @@ export default function LoginPage() {
       {/* Brand panel */}
       <div className="bg-primary text-primary-foreground relative hidden overflow-hidden lg:flex lg:flex-col lg:justify-between lg:p-12">
         <div className="bg-grid absolute inset-0 opacity-20" />
-        <div className="relative flex items-center gap-2.5">
-          <div className="bg-primary-foreground/15 flex size-10 items-center justify-center rounded-xl backdrop-blur">
-            <Sparkles className="size-5" />
-          </div>
-          <span className="text-lg font-semibold">Talent OS</span>
-        </div>
+        <Logo priority tone="onPrimary" className="relative" />
 
         <div className="relative max-w-md">
           <h1 className="text-3xl font-semibold tracking-tight">
@@ -95,12 +90,7 @@ export default function LoginPage() {
       {/* Form panel */}
       <div className="flex items-center justify-center p-6 sm:p-10">
         <div className="w-full max-w-sm">
-          <div className="mb-8 flex items-center gap-2.5 lg:hidden">
-            <div className="bg-primary text-primary-foreground flex size-10 items-center justify-center rounded-xl">
-              <Sparkles className="size-5" />
-            </div>
-            <span className="text-lg font-semibold">Talent OS</span>
-          </div>
+          <Logo priority className="mb-8 lg:hidden" />
 
           <h2 className="text-2xl font-semibold tracking-tight">Sign in</h2>
           <p className="text-muted-foreground mt-1 text-sm">

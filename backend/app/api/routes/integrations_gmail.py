@@ -51,14 +51,14 @@ def gmail_callback(code: str | None = None, state: str | None = None, error: str
     if error or not code or not state:
         log.warning("gmail_callback_missing_params", error=error,
                     has_code=bool(code), has_state=bool(state))
-        return RedirectResponse(f"{frontend}/admin?gmail=error", status_code=302)
+        return RedirectResponse(f"{frontend}/settings?gmail=error", status_code=302)
     try:
         tokens = oauth.exchange_code(code, state)
     except AuthenticationError:
         raise  # tampered/expired state → 401 envelope
     except Exception as exc:
         log.warning("gmail_callback_failed", error=str(exc))
-        return RedirectResponse(f"{frontend}/admin?gmail=error", status_code=302)
+        return RedirectResponse(f"{frontend}/settings?gmail=error", status_code=302)
     has_token = gmail.upsert_oauth_credentials(
         refresh_token=tokens["refresh_token"],
         access_token=tokens["access_token"],
@@ -69,9 +69,9 @@ def gmail_callback(code: str | None = None, state: str | None = None, error: str
     if not has_token:
         # Google omitted the refresh token and none was stored before.
         log.warning("gmail_callback_no_refresh_token", email=tokens.get("email"))
-        return RedirectResponse(f"{frontend}/admin?gmail=error&reason=no_refresh_token", status_code=302)
+        return RedirectResponse(f"{frontend}/settings?gmail=error&reason=no_refresh_token", status_code=302)
     log.info("gmail_connected", email=tokens.get("email"), auth_mode="oauth_db")
-    return RedirectResponse(f"{frontend}/admin?gmail=connected", status_code=302)
+    return RedirectResponse(f"{frontend}/settings?gmail=connected", status_code=302)
 
 
 @router.post("/disconnect")

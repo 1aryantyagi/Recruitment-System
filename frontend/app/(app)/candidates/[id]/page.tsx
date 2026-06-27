@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useFetch } from "@/lib/hooks";
 import type { CandidateCall, CandidateDetail } from "@/lib/types";
@@ -42,6 +42,7 @@ import { InitialsAvatar } from "@/components/common/avatar-name";
 import { ErrorState, LoadingState } from "@/components/common/states";
 import { BlacklistModal } from "@/components/candidates/blacklist-modal";
 import { RolePipeline } from "@/components/candidates/role-pipeline";
+import { VoiceScreeningModal } from "@/components/candidates/voice-screening-modal";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -53,6 +54,7 @@ export default function CandidateDetailPage() {
   const router = useRouter();
   const { canManageCandidates, isHR } = useAuth();
   const [blacklistOpen, setBlacklistOpen] = useState(false);
+  const [screenOpen, setScreenOpen] = useState(false);
 
   const { data: c, loading, error, reload } = useFetch<CandidateDetail>(
     (signal) => apiGet<CandidateDetail>(`/candidates/${id}`, undefined, signal),
@@ -63,16 +65,6 @@ export default function CandidateDetailPage() {
     try {
       const res = await apiGet<{ url: string }>(`/candidates/${id}/resume`);
       window.open(res.url, "_blank");
-    } catch (err) {
-      toast.error((err as Error).message);
-    }
-  };
-
-  const startScreening = async () => {
-    try {
-      await apiPost("/screening/start-call", { candidate_id: id });
-      toast.success("Screening call initiated");
-      reload();
     } catch (err) {
       toast.error((err as Error).message);
     }
@@ -124,7 +116,7 @@ export default function CandidateDetailPage() {
               <FileText className="size-4" /> Resume
             </Button>
             {isHR && (
-              <Button variant="outline" size="sm" onClick={startScreening}>
+              <Button variant="outline" size="sm" onClick={() => setScreenOpen(true)}>
                 <PhoneCall className="size-4" /> Screen
               </Button>
             )}
@@ -311,6 +303,15 @@ export default function CandidateDetailPage() {
         candidateId={c.id}
         candidateName={c.full_name}
         onDone={reload}
+      />
+
+      <VoiceScreeningModal
+        open={screenOpen}
+        onOpenChange={setScreenOpen}
+        candidateId={c.id}
+        applications={c.applications ?? []}
+        scores={c.scores ?? []}
+        onStarted={reload}
       />
     </>
   );

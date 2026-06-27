@@ -137,8 +137,12 @@ def realtime_instructions(*, questions: list[str], role: str = "", candidate_nam
         "- Sound natural and conversational, like a friendly recruiter on a live call.\n"
         "- Ask only ONE question at a time; keep each turn to 1-2 short sentences.\n"
         "- Briefly acknowledge what the candidate just said before asking the next thing.\n"
-        "- Cover the screening questions below, in order, rephrasing them to flow naturally; "
-        "a short clarifying follow-up is fine when an answer is unclear.\n"
+        "- Cover the screening questions below, in order, rephrasing them to flow naturally.\n"
+        "- If the candidate gives no answer, a vague non-answer, or an off-topic reply, do NOT "
+        "move on. Re-ask: rephrase the question or ask one short, specific follow-up to draw out "
+        "a real answer. Make at most 2 such attempts per question. Only once you have a genuine "
+        "answer — or after 2 attempts, or the candidate clearly declines or says they don't know "
+        "— briefly acknowledge it and move to the next question.\n"
         "- On the candidate's FIRST reply, judge availability: if it's not a good time, warmly "
         "offer to call back, say goodbye, then call end_screening with status='unavailable'.\n"
         f"- {outcome}\n"
@@ -191,8 +195,9 @@ def next_turn(*, questions: list[str], transcript: str, candidate_speech: str, t
     conversation so far and the candidate's latest reply. Uses the LLM when
     available (low-latency tier) and falls back to a scripted one-at-a-time walk."""
     n = len(questions)
-    # Safety cap so a stuck conversation always terminates.
-    if turn_index > n + 3:
+    # Safety cap so a stuck conversation always terminates. Allows for up to ~2
+    # re-asks per question (see the re-ask rule below) before forcing an end.
+    if turn_index > 2 * n + 4:
         log.debug("screening.next_turn.safety_cap", turn=turn_index, question_count=n)
         return ConversationDirective(reply=_THANKS_MSG, action="end_complete")
     if not llm.llm_available():
@@ -208,7 +213,14 @@ def next_turn(*, questions: list[str], transcript: str, candidate_speech: str, t
             "- Ask only ONE question per turn; keep each reply to 1-2 short sentences.\n"
             "- Briefly acknowledge what the candidate just said before asking the next thing.\n"
             "- Cover the screening questions provided, in order, but rephrase them to flow "
-            "naturally; a short clarifying follow-up is fine when an answer is unclear.\n"
+            "naturally.\n"
+            "- If the candidate gives no answer, a vague non-answer, or an off-topic reply, do "
+            "NOT move on (keep action='continue'). Re-ask: rephrase the question or ask one "
+            "short, specific follow-up to draw out a real answer. Make at most 2 such attempts "
+            "per question — the conversation so far shows how many times you've already asked. "
+            "Only once you have a genuine answer — or after 2 attempts, or the candidate clearly "
+            "declines or says they don't know — briefly acknowledge it and move to the next "
+            "question.\n"
             "- On the candidate's FIRST reply, judge availability: if it's not a good time, set "
             "action='end_unavailable' and warmly offer to call back.\n"
             "- Once all screening topics are covered, set action='end_complete' and thank them.\n"
