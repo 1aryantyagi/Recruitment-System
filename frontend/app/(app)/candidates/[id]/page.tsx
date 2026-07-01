@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
+  AlertTriangle,
   ArrowLeft,
   Ban,
   Briefcase,
@@ -26,7 +27,7 @@ import { toast } from "sonner";
 import { apiGet } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useFetch } from "@/lib/hooks";
-import type { CandidateCall, CandidateDetail } from "@/lib/types";
+import type { CandidateApplication, CandidateCall, CandidateDetail } from "@/lib/types";
 import {
   cn,
   formatCurrency,
@@ -77,6 +78,23 @@ export default function CandidateDetailPage() {
   const bestScore = [...(c.scores ?? [])].sort(
     (a, b) => (b.total_score ?? 0) - (a.total_score ?? 0),
   )[0];
+
+  // The single role this candidate is primarily judged on: the highest-match
+  // application (match_score, falling back to the resume/ATS score), preferring
+  // active applications over closed ones. The hiring-stages pipeline — resume +
+  // telephonic scores — is shown for this one role only, so judgment focuses on
+  // the top role the candidate is appearing for rather than spanning every role.
+  const appScore = (a: CandidateApplication) =>
+    a.match_score ??
+    c.scores?.find((s) => s.requisition_id === a.requisition_id)?.total_score ??
+    0;
+  const isClosed = (a: CandidateApplication) =>
+    a.status === "REJECTED" || a.status === "WITHDRAWN";
+  const primaryApp = [...(c.applications ?? [])].sort((a, b) => {
+    if (isClosed(a) !== isClosed(b)) return isClosed(a) ? 1 : -1; // active first
+    return appScore(b) - appScore(a); // then highest match
+  })[0];
+  const otherApps = (c.applications ?? []).filter((a) => a.id !== primaryApp?.id);
 
   return (
     <>
@@ -232,29 +250,29 @@ export default function CandidateDetailPage() {
             </TabsContent>
 
             <TabsContent value="applications" className="mt-4 space-y-3">
-              {c.applications?.length ? (
-                c.applications.map((a) => {
-                  const title = c.scores?.find(
-                    (s) => s.requisition_id === a.requisition_id,
-                  )?.requisition_title;
-                  return (
-                    <Card key={a.id} className="gap-3 p-4">
-                      <div className="flex items-center gap-3">
-                        <Briefcase className="text-muted-foreground size-4 shrink-0" />
-                        <Link href={`/jobs/${a.requisition_id}`} className="flex-1 truncate text-sm font-medium hover:underline">
-                          {title ?? `${a.requisition_id.slice(0, 8)}…`}
-                        </Link>
-                        {a.match_score != null && (
-                          <span className="text-muted-foreground text-xs tabular-nums">{scoreToPercent(a.match_score)} match</span>
-                        )}
-                        <StageBadge status={a.status} />
-                      </div>
-                      <Separator />
-                      <p className="text-muted-foreground text-xs font-medium">Hiring stages</p>
-                      <RolePipeline c={c} requisitionId={a.requisition_id} />
-                    </Card>
-                  );
-                })
+              {primaryApp ? (
+                <>
+                  <ApplicationPipelineCard c={c} a={primaryApp} />
+                  {otherApps.length > 0 && (
+                    <p className="text-muted-foreground px-1 text-xs">
+                      Also applied to{" "}
+                      {otherApps.map((a, i) => {
+                        const t =
+                          c.scores?.find((s) => s.requisition_id === a.requisition_id)
+                            ?.requisition_title ?? `${a.requisition_id.slice(0, 8)}…`;
+                        return (
+                          <span key={a.id}>
+                            {i > 0 && ", "}
+                            <Link href={`/jobs/${a.requisition_id}`} className="hover:underline">
+                              {t}
+                            </Link>
+                          </span>
+                        );
+                      })}
+                      . Judged on the top-matched role above.
+                    </p>
+                  )}
+                </>
               ) : (
                 <Card className="p-5"><EmptyTab text="Not applied to any requisitions." /></Card>
               )}
@@ -271,13 +289,19 @@ export default function CandidateDetailPage() {
                       </span>
                       <InterviewStatusBadge status={iv.status} className="ml-auto" />
                     </div>
-                    <div className="text-muted-foreground flex items-center gap-3 pl-7 text-xs">
+                    <div className="text-muted-foreground flex flex-wrap items-center gap-3 pl-7 text-xs">
                       {iv.scheduled_at && <span>{formatDateTime(iv.scheduled_at)}</span>}
                       {iv.ai_overall_rating != null && (
                         <span className="inline-flex items-center gap-1">
                           <Sparkles className="size-3" /> AI {scoreToPercent(iv.ai_overall_rating)}
                         </span>
                       )}
+                      {(iv.status === "SCHEDULED" || iv.status === "RESCHEDULED") &&
+                        iv.invite_sent === false && (
+                          <span className="text-destructive inline-flex items-center gap-1 font-medium">
+                            <AlertTriangle className="size-3" /> Invite not sent
+                          </span>
+                        )}
                     </div>
                   </Card>
                 ))
@@ -331,6 +355,27 @@ function RiskRow({ label, ok, value }: { label: string; ok: boolean; value: stri
 
 function EmptyTab({ text }: { text: string }) {
   return <p className="text-muted-foreground py-8 text-center text-sm">{text}</p>;
+}
+
+function ApplicationPipelineCard({ c, a }: { c: CandidateDetail; a: CandidateApplication }) {
+  const title = c.scores?.find((s) => s.requisition_id === a.requisition_id)?.requisition_title;
+  return (
+    <Card className="gap-3 p-4">
+      <div className="flex items-center gap-3">
+        <Briefcase className="text-muted-foreground size-4 shrink-0" />
+        <Link href={`/jobs/${a.requisition_id}`} className="flex-1 truncate text-sm font-medium hover:underline">
+          {title ?? `${a.requisition_id.slice(0, 8)}…`}
+        </Link>
+        {a.match_score != null && (
+          <span className="text-muted-foreground text-xs tabular-nums">{scoreToPercent(a.match_score)} match</span>
+        )}
+        <StageBadge status={a.status} />
+      </div>
+      <Separator />
+      <p className="text-muted-foreground text-xs font-medium">Hiring stages</p>
+      <RolePipeline c={c} requisitionId={a.requisition_id} />
+    </Card>
+  );
 }
 
 function CallCard({ call }: { call: CandidateCall }) {

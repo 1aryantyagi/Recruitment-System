@@ -275,6 +275,7 @@ def interview_dict(i: Interview, with_feedback: bool = False, db: Session | None
         "scheduled_at": _iso(i.scheduled_at),
         "meeting_link": i.meeting_link,
         "calendar_event_id": i.calendar_event_id,
+        "invite_sent": i.invite_sent,
         "ai_overall_rating": i.ai_overall_rating,
         "ai_analysis": i.ai_analysis,
         "has_recording": bool(i.recording_url),

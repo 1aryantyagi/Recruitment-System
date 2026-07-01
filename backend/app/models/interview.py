@@ -64,6 +64,10 @@ class Interview(Base):
     scheduled_at = Column(DateTime(timezone=True), nullable=True)
     meeting_link = Column(String(500), nullable=True)
     calendar_event_id = Column(String(200), nullable=True)
+    # Whether the candidate's calendar invite email was actually sent. False after
+    # scheduling means the interview exists but no invite went out (e.g. Gmail not
+    # configured, send failed, or the candidate has no real email) — surfaced to HR.
+    invite_sent = Column(Boolean, nullable=False, server_default=text("false"), default=False)
     recording_url = Column(String(1000), nullable=True)
     transcript = Column(Text, nullable=True)
     ai_analysis = Column(JSONB, nullable=True)

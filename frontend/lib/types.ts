@@ -214,6 +214,7 @@ export interface CandidateInterview {
   status: InterviewStatus;
   scheduled_at?: string | null;
   meeting_link?: string | null;
+  invite_sent?: boolean | null;
   ai_overall_rating?: number | null;
   ai_analysis?: unknown;
   feedback?: unknown;

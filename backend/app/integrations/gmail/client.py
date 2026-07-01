@@ -22,6 +22,9 @@ import base64
 import datetime as dt
 import json
 import threading
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -566,6 +569,72 @@ def send_email(*, to: str, subject: str, body: str, db=None) -> dict | None:
     except Exception as exc:
         log.warning("gmail_send_email_failed", error=str(exc), to=to, exc_info=True)
         log.info("gmail.send_email.end", to=to, error=True)
+        return None
+
+
+def account_email(db=None) -> str | None:
+    """The address Gmail sends from — used as the calendar invite ORGANIZER.
+
+    Prefers the stored ``connected_email`` (oauth_db mode); falls back to the live
+    Gmail profile (service-account / env modes). Returns None when unavailable."""
+    row = _load_db_row(db)
+    if row is not None and row.connected_email:
+        return row.connected_email
+    try:
+        svc = _service(db)
+        if svc is not None:
+            return svc.users().getProfile(userId="me").execute().get("emailAddress")
+    except Exception as exc:
+        log.debug("gmail.account_email.failed", error=str(exc))
+    return None
+
+
+def send_invite(*, to: str, subject: str, body: str, ics: str,
+                cc: list[str] | None = None, db=None) -> dict | None:
+    """Send a calendar invitation email carrying an .ics (METHOD:REQUEST) part so
+    the recipient's mail client renders it as an interview invite with RSVP. The
+    .ics is attached both inline (``text/calendar``) and as a downloadable
+    ``invite.ics`` for clients that ignore inline calendars.
+
+    Returns ``{"message_id", "thread_id"}`` on success, or None when Gmail is
+    unconfigured or the send fails — the caller surfaces the failure (it does not
+    fall back to a fake success). Works under the existing ``gmail.modify`` scope."""
+    log.info("gmail.send_invite.start", to=to, cc_count=len(cc or []))
+    if not gmail_configured(db):
+        log.info("gmail.send_invite.end", configured=False, to=to)
+        return None
+    try:
+        svc = _service(db)
+        if svc is None:
+            log.info("gmail.send_invite.end", service=False, to=to)
+            return None
+        root = MIMEMultipart("mixed")
+        root["To"] = to
+        if cc:
+            root["Cc"] = ", ".join(cc)
+        root["Subject"] = subject
+
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(body or "", "plain", "utf-8"))
+        cal = MIMEText(ics, "calendar", "utf-8")
+        cal.replace_header("Content-Type", 'text/calendar; charset="utf-8"; method=REQUEST')
+        alt.attach(cal)
+        root.attach(alt)
+
+        part = MIMEBase("application", "ics")
+        part.set_payload(ics.encode("utf-8"))
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", 'attachment; filename="invite.ics"')
+        root.attach(part)
+
+        send_body = {"raw": base64.urlsafe_b64encode(root.as_bytes()).decode("ascii")}
+        sent = svc.users().messages().send(userId="me", body=send_body).execute()
+        result = {"message_id": sent.get("id"), "thread_id": sent.get("threadId")}
+        log.info("gmail.send_invite.end", to=to, message_id=result["message_id"])
+        return result
+    except Exception as exc:
+        log.warning("gmail_send_invite_failed", error=str(exc), to=to, exc_info=True)
+        log.info("gmail.send_invite.end", to=to, error=True)
         return None
 
 

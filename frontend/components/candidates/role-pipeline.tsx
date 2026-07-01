@@ -64,7 +64,11 @@ function buildSteps(
   const isRejected = status === "REJECTED";
 
   const score = c.scores.find((s) => s.requisition_id === reqId);
-  const calls = c.calls.filter((cl) => cl.requisition_id === reqId);
+  // Calls scoped to this role take precedence; when there are none, fall back to
+  // the candidate's general screening calls (no requisition linkage — e.g. a phone
+  // screen run without a role) so the score still surfaces on the Telephonic stage.
+  const reqCalls = c.calls.filter((cl) => cl.requisition_id === reqId);
+  const calls = reqCalls.length ? reqCalls : c.calls.filter((cl) => cl.requisition_id == null);
   const latestCall = calls.find((cl) => cl.ai_score != null) ?? calls[0];
   const callDetail =
     latestCall?.ai_score != null ? `AI ${scoreToPercent(latestCall.ai_score)}` : undefined;
@@ -94,6 +98,10 @@ function buildSteps(
     tel = { state: "current", detail: callDetail };
   } else if (isRejected && latestCall) {
     tel = { state: "rejected", detail: callDetail };
+  } else if (latestCall?.ai_score != null) {
+    // A screening call finished with a score even though the application hasn't
+    // formally advanced — surface the result instead of hiding it as "Upcoming".
+    tel = { state: "completed", detail: callDetail };
   } else {
     tel = { state: "upcoming" };
   }

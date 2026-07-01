@@ -8,16 +8,19 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from typing import Any, TypedDict
+from zoneinfo import ZoneInfo
 
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import select
 
+from app.config import settings
 from app.core.errors import BadRequestError, NotFoundError
 from app.core.events import log_event
 from app.core.logging import get_logger, log_step
 from app.database.base import SessionLocal
-from app.integrations.ms_graph import client as graph
+from app.integrations.gmail import client as gmail
 from app.models import Candidate, Interview, JobApplication, Requisition, User
+from app.services.ics import build_invite_ics
 from app.models.enums import ApplicationStatus, EventType, InterviewStatus, RoundType
 from app.models.logs import ApplicationStatusHistory
 
@@ -129,7 +132,30 @@ def create_interview(state: ScheduleState, config) -> dict:
         return {"interview_id": str(interview.id)}
 
 
+def _company_tz() -> ZoneInfo:
+    """Company-local zone for the human-readable date/time in the invite body."""
+    try:
+        return ZoneInfo(settings.company_timezone)
+    except Exception:
+        return ZoneInfo("UTC")
+
+
+# Seed / synthetic domains that are not real deliverable mailboxes.
+_PLACEHOLDER_DOMAINS = {"local.dev", "placeholder.local", "example.com"}
+
+
+def _real_email(email: str | None) -> bool:
+    """True for a deliverable external address — excludes seed/placeholder domains
+    (e.g. the demo interviewers' ``@local.dev``), so we never email a fake mailbox."""
+    if not email or "@" not in email:
+        return False
+    return email.rsplit("@", 1)[1].lower() not in _PLACEHOLDER_DOMAINS
+
+
 def send_calendar_invite(state: ScheduleState, config) -> dict:
+    """Email the candidate an .ics interview invite via Gmail. Records whether the
+    invite actually went out on ``interview.invite_sent`` and logs an error (rather
+    than faking success) when it didn't — the booking itself is never rolled back."""
     with log_step(log, "scheduling.send_calendar_invite",
                   interview_id=state.get("interview_id")) as step:
         db = _db(config)
@@ -144,29 +170,89 @@ def send_calendar_invite(state: ScheduleState, config) -> dict:
 
         start = interview.scheduled_at or dt.datetime.now(dt.timezone.utc)
         end = start + dt.timedelta(hours=1)
-        organizer = interviewer.email if interviewer else "scheduler@local.dev"
-        attendees = [e for e in [organizer, cand.email if cand and "@placeholder.local" not in cand.email else None] if e]
-        subject = f"{interview.round_type.value} Interview — {cand.full_name if cand else 'Candidate'}"
-        if req:
-            subject += f" ({req.title})"
+        round_label = interview.round_type.value
+        role = req.title if req else None
+        cand_email = cand.email if cand and _real_email(cand.email) else None
+        # cc the interviewer only when they have a real (deliverable) mailbox.
+        cc = [interviewer.email] if interviewer and _real_email(interviewer.email) else []
 
-        with log_step(log, "scheduling.send_calendar_invite.ms_graph_create_meeting",
-                      organizer=organizer, attendee_count=len(attendees),
-                      mock=graph.is_mock()) as call_step:
-            meeting = graph.create_meeting(
-                organizer_email=organizer, subject=subject,
-                start_iso=start.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-                end_iso=end.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
-                attendee_emails=attendees,
+        subject = f"{round_label} Interview — {cand.full_name if cand else 'Candidate'}"
+        if role:
+            subject += f" ({role})"
+
+        sent = None
+        if cand_email:
+            tz = _company_tz()
+            when_local = (
+                start.astimezone(tz).strftime("%A, %d %b %Y at %I:%M %p").replace(" 0", " ")
             )
-            call_step["event_id"] = meeting.get("event_id")
-            call_step["mock"] = meeting.get("mock")
-        if not interview.meeting_link:
-            interview.meeting_link = meeting.get("join_url")
-        interview.calendar_event_id = meeting.get("event_id")
+            link = interview.meeting_link
+            first = cand.full_name.split(" ")[0] if cand and cand.full_name else "there"
+            body_lines = [
+                f"Hi {first},",
+                "",
+                f"Your {round_label} interview{f' for {role}' if role else ''} is scheduled for:",
+                f"    {when_local} ({settings.company_timezone})",
+            ]
+            if interviewer and interviewer.name:
+                body_lines.append(f"    Interviewer: {interviewer.name}")
+            if link:
+                body_lines.append(f"    Join link: {link}")
+            body_lines += [
+                "",
+                "A calendar invite is attached — add it to your calendar to confirm.",
+                "We look forward to speaking with you.",
+                "",
+                f"— {settings.company_name} Talent Team",
+            ]
+            body = "\n".join(body_lines)
+            description = f"{round_label} interview" + (f" for {role}" if role else "")
+            if link:
+                description += f"\nJoin link: {link}"
+
+            organizer = gmail.account_email(db) or "no-reply@talent-os.local"
+            attendees = [{"email": cand_email, "name": cand.full_name if cand else ""}]
+            if interviewer and _real_email(interviewer.email):
+                attendees.append({"email": interviewer.email, "name": interviewer.name or ""})
+            ics = build_invite_ics(
+                uid=f"{interview.id}@talent-os",
+                summary=subject,
+                start_utc=start,
+                end_utc=end,
+                organizer_email=organizer,
+                organizer_name=settings.company_name,
+                attendees=attendees,
+                description=description,
+                location=link or "",
+            )
+            with log_step(log, "scheduling.send_calendar_invite.gmail_send",
+                          to=cand_email, cc_count=len(cc),
+                          configured=gmail.gmail_configured(db)) as call_step:
+                sent = gmail.send_invite(to=cand_email, subject=subject, body=body,
+                                         ics=ics, cc=cc, db=db)
+                call_step["sent"] = bool(sent)
+
+        if sent:
+            interview.invite_sent = True
+            interview.calendar_event_id = f"gmail:{sent.get('message_id')}"
+            step["invite_sent"] = True
+            step["calendar_event_id"] = interview.calendar_event_id
+            log.info("scheduling.send_calendar_invite.sent", interview_id=str(interview.id),
+                     to=cand_email, message_id=sent.get("message_id"))
+        else:
+            interview.invite_sent = False
+            reason = (
+                "no_candidate_email" if not cand_email
+                else "gmail_not_configured" if not gmail.gmail_configured(db)
+                else "send_failed"
+            )
+            step["invite_sent"] = False
+            step["failure_reason"] = reason
+            # Surface loudly: the interview is booked but the candidate was NOT emailed.
+            log.error("scheduling.send_calendar_invite.failed", interview_id=str(interview.id),
+                      candidate_id=str(interview.candidate_id), to=cand_email, reason=reason)
         db.flush()
-        step["calendar_event_id"] = meeting.get("event_id")
-        return {"calendar_event_id": meeting.get("event_id")}
+        return {"calendar_event_id": interview.calendar_event_id}
 
 
 def emit_analytics(state: ScheduleState, config) -> dict:
